@@ -21,6 +21,9 @@ NONINTERACTIVE=0
 OPT_YES=0
 OPT_PRUNE=0
 OPT_HTTP_SET=0
+OPT_ADMIN=0
+FORCE_ADMIN=0
+OPT_MINUTES=""
 OPT_CN=""
 OPT_EXTRA=""
 OPT_NAME=""
@@ -113,7 +116,8 @@ usage() {
   env                   deploy/.env 작성 또는 수정
   ca                    CA 생성
   server                서버 인증서 발급
-  client <이름>         클라이언트 인증서 발급
+  client <이름> [--admin] 클라이언트 인증서 발급. --admin 이면 OU=admin
+  enroll                일회용 등록 링크 출력 (--name, --minutes)
   list                  클라이언트 인증서 목록
   revoke <이름>         클라이언트 인증서 폐기 후 Nginx 리로드
   start                 스택 시작
@@ -138,8 +142,8 @@ usage() {
   --https-port N        외부 HTTPS 포트 (기본 443)
   --http-port N|none    HTTP 리다이렉트 포트. none 이면 끔
   --cn 도메인  --extra name,ip
-  --name 장치  --p12-pass 비밀번호
-  --service webtop|nginx|geoipupdate
+  --name 장치  --p12-pass 비밀번호  --admin  --minutes N
+  --service webtop|nginx|geoipupdate|certadmin
   --yes                 업데이트 확인 질문을 생략
   --prune               적용 후 이전 dangling 이미지 삭제
   --schedule '0 6 * * 1'
@@ -252,11 +256,21 @@ normalize_http_port() {
   printf '%s' "$value"
 }
 
+ensure_proxy_secret() {
+  local cur
+  cur=$(env_get CERTADMIN_PROXY_SECRET)
+  if [[ -z "$cur" ]]; then
+    cur=$(openssl rand -hex 32)
+    env_set CERTADMIN_PROXY_SECRET "$cur" || return 1
+  fi
+}
+
 require_env_file() {
   if [[ ! -f "$ENV_FILE" ]]; then
     err "deploy/.env 가 없습니다. 먼저 초기 설정을 실행하세요."
     return 1
   fi
+  ensure_proxy_secret || return 1
   return 0
 }
 
@@ -534,6 +548,7 @@ cmd_env() {
   env_set TZ "$tz" || return 1
   env_set HTTPS_PORT "$https" || return 1
   env_set HTTP_PORT "$http" || return 1
+  ensure_proxy_secret || return 1
   ok "deploy/.env 를 저장했습니다. 라이선스 키는 출력하지 않습니다."
   info "  계정 ID=${account}  국가=${countries}  PUID=${puid}  PGID=${pgid}  TZ=${tz}"
   info "  HTTPS=${https}  HTTP=${http:-끔}"
@@ -624,8 +639,12 @@ cmd_client() {
     return 0
   fi
   local log rc
+  local -a extra_args=()
+  if [[ "$OPT_ADMIN" -eq 1 || "$FORCE_ADMIN" -eq 1 ]]; then
+    extra_args+=(--admin)
+  fi
   log=$(mktemp)
-  P12_PASS="$pass" "$GEN_CERTS" client "$name" >"$log" 2>&1
+  P12_PASS="$pass" "$GEN_CERTS" client "$name" "${extra_args[@]}" >"$log" 2>&1
   rc=$?
   grep -v '^PKCS#12 password:' "$log" || true
   rm -f "$log"
@@ -637,6 +656,60 @@ cmd_client() {
   info "  인증서  ${CERT_DIR}/clients/${name}.crt"
   info "  개인키  ${CERT_DIR}/clients/${name}.key"
   info "  PKCS#12 ${CERT_DIR}/clients/${name}.p12"
+}
+
+cmd_admin_client() {
+  FORCE_ADMIN=1
+  cmd_client
+  local rc=$?
+  FORCE_ADMIN=0
+  return "$rc"
+}
+
+access_base() {
+  local port host cn subject
+  port=$(https_port_configured)
+  host="localhost"
+  if [[ -f "$CERT_DIR/server/server.crt" ]] && have openssl; then
+    subject=$(openssl x509 -in "$CERT_DIR/server/server.crt" -noout -subject 2>/dev/null || true)
+    cn=$(printf '%s' "$subject" | sed -n 's/.*CN *= *\([^,/]*\).*/\1/p')
+    cn=${cn#"${cn%%[![:space:]]*}"}
+    [[ -n "$cn" ]] && host=$cn
+  fi
+  if [[ "$port" == "443" ]]; then
+    printf 'https://%s' "$host"
+  else
+    printf 'https://%s:%s' "$host" "$port"
+  fi
+}
+
+cmd_enroll() {
+  local name minutes base running
+  require_env_file || return 1
+  if [[ "$NONINTERACTIVE" -eq 1 ]]; then
+    name=${OPT_NAME:-}
+    minutes=${OPT_MINUTES:-10}
+  else
+    name=$(prompt "장치 이름 (없으면 Enter)" "")
+    minutes=$(prompt "유효 시간(분)" "10")
+  fi
+  if [[ ! "$minutes" =~ ^[0-9]+$ ]]; then
+    err "분은 숫자여야 합니다."
+    return 1
+  fi
+  running=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -x 'webtop-certadmin' || true)
+  if [[ -z "$running" ]]; then
+    err "certadmin 이 실행 중이 아닙니다. 스택을 시작하세요."
+    return 1
+  fi
+  base=$(access_base)
+  if [[ -n "$name" ]]; then
+    compose exec -T -e "PUBLIC_BASE_URL=${base}" certadmin \
+      python -u /app/certadmin.py enroll --minutes "$minutes" --name "$name"
+  else
+    compose exec -T -e "PUBLIC_BASE_URL=${base}" certadmin \
+      python -u /app/certadmin.py enroll --minutes "$minutes"
+  fi
 }
 
 cmd_list() {
@@ -757,11 +830,11 @@ cmd_logs() {
       err "서비스가 필요합니다. 예: ./webtop.sh logs nginx"
       return 1
     fi
-    svc=$(prompt "서비스 (webtop/nginx/geoipupdate)" "nginx")
+    svc=$(prompt "서비스 (webtop/nginx/geoipupdate/certadmin)" "nginx")
   fi
   case "$svc" in
-    webtop|nginx|geoipupdate) ;;
-    *) err "서비스는 webtop, nginx, geoipupdate 중 하나여야 합니다."; return 1 ;;
+    webtop|nginx|geoipupdate|certadmin) ;;
+    *) err "서비스는 webtop, nginx, geoipupdate, certadmin 중 하나여야 합니다."; return 1 ;;
   esac
   require_env_file || return 1
   if [[ "$NONINTERACTIVE" -eq 1 || ! -t 1 ]]; then
@@ -1178,6 +1251,8 @@ draw_menu() {
 15) 전체 자동 설치
 16) 업데이트 확인
 17) 주간 자동 확인
+18) 관리자 인증서 발급
+19) 일회용 등록 링크
  0) 종료
 EOF
 }
@@ -1202,6 +1277,8 @@ menu_once() {
     15) cmd_install || true ;;
     16) cmd_check_update || true ;;
     17) cmd_cron_menu || true ;;
+    18) cmd_admin_client || true ;;
+    19) cmd_enroll || true ;;
     0|q|Q|exit) return 10 ;;
     "") ;;
     *) err "없는 번호입니다: ${choice}" ;;
@@ -1246,6 +1323,8 @@ parse_opts() {
       --mode) OPT_MODE=$2; shift 2 ;;
       --yes) OPT_YES=1; shift ;;
       --prune) OPT_PRUNE=1; shift ;;
+      --admin) OPT_ADMIN=1; shift ;;
+      --minutes) OPT_MINUTES=$2; shift 2 ;;
       --cn) OPT_CN=$2; shift 2 ;;
       --extra) OPT_EXTRA=$2; shift 2 ;;
       --name) OPT_NAME=$2; shift 2 ;;
@@ -1308,6 +1387,7 @@ main() {
     update|pull) cmd_update ;;
     check-update) cmd_check_update ;;
     auto-update) cmd_auto_update ;;
+    enroll) cmd_enroll ;;
     cron-install) cmd_cron_install ;;
     cron-remove) cmd_cron_remove ;;
     cron-status) cmd_cron_status ;;

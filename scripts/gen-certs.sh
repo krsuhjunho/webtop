@@ -3,7 +3,7 @@
 # Certificates stay under deploy/certs and are gitignored.
 set -eu
 
-ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
 CERT_DIR=${CERT_DIR:-"$ROOT/deploy/certs"}
 P12_PASS=${P12_PASS:-changeit}
 DAYS_CA=${DAYS_CA:-3650}
@@ -19,7 +19,9 @@ Commands:
   init                         Create the CA and an empty CRL (idempotent)
   server [--cn NAME] [--san LIST]
                                Issue the Nginx server certificate
-  client <name>                Issue a client cert and <name>.p12
+  client <name> [--admin] [--days N]
+                               Issue a client cert and <name>.p12
+                               --admin sets OU=admin so Nginx allows /admin/
   revoke <name>                Revoke a client cert and regenerate the CRL
   crl                          Regenerate the CRL from the CA database
 
@@ -28,6 +30,8 @@ Options:
   --san LIST                   Comma-separated subjectAltName values
                                (default DNS:webtop.local,DNS:localhost,IP:127.0.0.1)
   --p12-pass PASS              PKCS#12 password (default changeit, or $P12_PASS)
+  --admin                      Mark the client certificate OU=admin
+  --days N                     Certificate lifetime in days (default 825)
 
 After revoke or crl, reload Nginx so it re-reads the CRL:
   docker compose -f deploy/docker-compose.yml exec nginx nginx -s reload
@@ -180,13 +184,18 @@ cmd_client() {
   name=${1:-}
   [ -n "$name" ] || { usage; exit 1; }
   shift || true
+  admin=0
+  days=$DAYS_CERT
   while [ $# -gt 0 ]; do
     case $1 in
       --p12-pass) P12_PASS=$2; shift 2 ;;
+      --admin) admin=1; shift ;;
+      --days) days=$2; shift 2 ;;
       *) echo "unknown option: $1" >&2; usage; exit 1 ;;
     esac
   done
   valid_name "$name" || { echo "invalid client name: $name" >&2; exit 1; }
+  printf '%s' "$days" | grep -Eq '^[0-9]+$' || { echo "invalid days" >&2; exit 1; }
   ensure_layout
   [ -f "$CERT_DIR/ca/ca.crt" ] || { echo "run init first" >&2; exit 1; }
   if [ -f "$CERT_DIR/clients/${name}.crt" ]; then
@@ -201,13 +210,19 @@ basicConstraints = CA:FALSE
 keyUsage = critical, digitalSignature, keyEncipherment
 extendedKeyUsage = clientAuth
 EOF
+  if [ "$admin" -eq 1 ]; then
+    subject="/CN=${name}/OU=admin/O=Webtop"
+  else
+    subject="/CN=${name}/O=Webtop"
+  fi
   openssl req -new -nodes -newkey rsa:2048 \
     -keyout "$CERT_DIR/clients/${name}.key" \
     -out "$CERT_DIR/clients/${name}.csr" \
-    -subj "/CN=${name}/O=Webtop"
+    -subj "$subject"
   openssl ca -batch -config "$CERT_DIR/openssl.cnf" \
     -in "$CERT_DIR/clients/${name}.csr" \
     -out "$CERT_DIR/clients/${name}.crt" \
+    -days "$days" \
     -extfile "$ext" -extensions client_ext
   pem_only "$CERT_DIR/clients/${name}.crt"
   openssl pkcs12 -export \
