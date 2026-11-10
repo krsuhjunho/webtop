@@ -48,13 +48,14 @@ jobs:
           cache-to: ${{ github.event_name != 'pull_request' && 'type=gha,scope=amd64,mode=max' || '' }}
           outputs: ${{ github.event_name != 'pull_request' && 'type=image,name=ghcr.io/krsuhjunho/webtop,push-by-digest=true,push=true' || 'type=docker' }}
       - name: Export digest
-        if: github.event_name != 'pull_request'
+        # An explicit if replaces the default success() check.
+        if: success() && github.event_name != 'pull_request'
         run: |
           mkdir -p "${{ runner.temp }}/digests"
           digest="${{ steps.build.outputs.digest }}"
           touch "${{ runner.temp }}/digests/${digest#sha256:}"
       - uses: actions/upload-artifact@v4
-        if: github.event_name != 'pull_request'
+        if: success() && github.event_name != 'pull_request'
         with:
           name: digest-amd64
           path: ${{ runner.temp }}/digests/*
@@ -64,7 +65,9 @@ jobs:
     name: linux/arm64 (native)
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 120
-    continue-on-error: true
+    # Do not set continue-on-error. needs.* only exposes .result, and
+    # continue-on-error turns a failed job's result into success, so the
+    # QEMU fallback would never see the failure.
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
@@ -88,13 +91,13 @@ jobs:
           cache-to: ${{ github.event_name != 'pull_request' && 'type=gha,scope=arm64,mode=max' || '' }}
           outputs: ${{ github.event_name != 'pull_request' && 'type=image,name=ghcr.io/krsuhjunho/webtop,push-by-digest=true,push=true' || 'type=docker' }}
       - name: Export digest
-        if: github.event_name != 'pull_request'
+        if: success() && github.event_name != 'pull_request'
         run: |
           mkdir -p "${{ runner.temp }}/digests"
           digest="${{ steps.build.outputs.digest }}"
           touch "${{ runner.temp }}/digests/${digest#sha256:}"
       - uses: actions/upload-artifact@v4
-        if: github.event_name != 'pull_request'
+        if: success() && github.event_name != 'pull_request'
         with:
           name: digest-arm64
           path: ${{ runner.temp }}/digests/*
@@ -103,7 +106,10 @@ jobs:
   build-arm64-qemu:
     name: linux/arm64 (qemu fallback)
     needs: build-arm64
-    if: always() && needs.build-arm64.outcome == 'failure'
+    # always() is required: a failed needed job would otherwise skip this job
+    # before the if expression runs. result == failure covers a failed build
+    # and a missing ubuntu-24.04-arm runner.
+    if: always() && needs.build-arm64.result == 'failure'
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     steps:
@@ -130,13 +136,13 @@ jobs:
           cache-to: ${{ github.event_name != 'pull_request' && 'type=gha,scope=arm64,mode=max' || '' }}
           outputs: ${{ github.event_name != 'pull_request' && 'type=image,name=ghcr.io/krsuhjunho/webtop,push-by-digest=true,push=true' || 'type=docker' }}
       - name: Export digest
-        if: github.event_name != 'pull_request'
+        if: success() && github.event_name != 'pull_request'
         run: |
           mkdir -p "${{ runner.temp }}/digests"
           digest="${{ steps.build.outputs.digest }}"
           touch "${{ runner.temp }}/digests/${digest#sha256:}"
       - uses: actions/upload-artifact@v4
-        if: github.event_name != 'pull_request'
+        if: success() && github.event_name != 'pull_request'
         with:
           name: digest-arm64
           path: ${{ runner.temp }}/digests/*
@@ -145,11 +151,10 @@ jobs:
   merge:
     name: publish manifest
     needs: [build-amd64, build-arm64, build-arm64-qemu]
-    if: >
-      always() &&
-      github.event_name != 'pull_request' &&
-      needs.build-amd64.result == 'success' &&
-      (needs.build-arm64.outcome == 'success' || needs.build-arm64-qemu.result == 'success')
+    # needs.* has result (success, failure, cancelled, skipped), not outcome.
+    # When native arm64 succeeds, the QEMU job is skipped and this still runs.
+    # When native arm64 fails and QEMU succeeds, this still runs.
+    if: always() && github.event_name != 'pull_request' && needs.build-amd64.result == 'success' && (needs.build-arm64.result == 'success' || needs.build-arm64-qemu.result == 'success')
     runs-on: ubuntu-24.04
     steps:
       - uses: docker/setup-buildx-action@v3
@@ -167,12 +172,38 @@ jobs:
         run: |
           set -eu
           date_tag=$(date -u +%y%m%d)
+          shopt -s nullglob
+          files=(/tmp/digests/*)
+          if [ "${#files[@]}" -ne 2 ]; then
+            echo "expected 2 architecture digests, found ${#files[@]}" >&2
+            ls -la /tmp/digests >&2 || true
+            exit 1
+          fi
           args=()
-          for f in /tmp/digests/*; do
+          for f in "${files[@]}"; do
             args+=("${IMAGE}@sha256:$(basename "$f")")
           done
+          echo "Publishing ${args[*]}"
           docker buildx imagetools create \
             -t "${IMAGE}:latest" \
             -t "${IMAGE}:${date_tag}" \
             -t "${IMAGE}:sha-${GITHUB_SHA}" \
             "${args[@]}"
+
+  require-publish:
+    name: require published manifest
+    needs: merge
+    # A skipped publish job does not fail the workflow by itself. On push,
+    # schedule, and workflow_dispatch this job fails the run unless tags exist.
+    if: always() && github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Fail unless the manifest was published
+        env:
+          MERGE_RESULT: ${{ needs.merge.result }}
+        run: |
+          echo "publish manifest result: ${MERGE_RESULT}"
+          if [ "${MERGE_RESULT}" != "success" ]; then
+            echo "The multi-arch manifest was not published (result=${MERGE_RESULT})." >&2
+            exit 1
+          fi
