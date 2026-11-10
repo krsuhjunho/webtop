@@ -126,6 +126,8 @@ Selkies 는 캡처용 컴포지터와 KWin 이 중첩이라, 자판에 없는 �
 ./webtop.sh ca
 ./webtop.sh server --cn webtop.example.com --extra www.webtop.example.com
 ./webtop.sh client laptop --p12-pass '비밀번호'
+./webtop.sh client owner --admin --p12-pass '비밀번호'
+./webtop.sh enroll --name phone --minutes 10
 ./webtop.sh list
 ./webtop.sh revoke laptop
 ./webtop.sh start
@@ -141,6 +143,10 @@ Selkies 는 캡처용 컴포지터와 KWin 이 중첩이라, 자판에 없는 �
 `update` 와 `check-update` 는 이 머신의 아키텍처에 해당하는 `ghcr.io/krsuhjunho/webtop:latest` 다이제스트를 실행 중인 컨테이너, 로컬 이미지와 비교합니다. 같으면 받지 않습니다. 다르면 맞는 `yymmdd` 태그를 보여주고, 확인 후 pull 합니다. `cron-install` 은 사용자 crontab 에 `webtop.sh auto-update` 를 넣습니다. 기본은 월요일 06:00 이고, `UPDATE_MODE=check` 이면 로그만, `apply` 이면 새 다이제스트일 때 적용합니다. 잠금은 `flock` 이고 기록은 `deploy/logs/update.log` 입니다.
 
 라이선스 키와 PKCS#12 비밀번호는 메뉴에서 화면에 표시하지 않고 입력받습니다. 스택 명령은 `docker compose --env-file deploy/.env -f deploy/docker-compose.yml` 를 사용합니다.
+
+`https://호스트/admin/` 은 클라이언트 인증서에 `OU=admin` 이 있거나 CN 이 `ADMIN_CNS` 에 있을 때만 열립니다. 메뉴의 관리자 인증서 발급 또는 `./webtop.sh client 이름 --admin` 으로 만듭니다. 그 페이지에서 인증서 목록, 발급, 폐기, 일회용 등록 링크를 처리합니다. 폐기하면 CRL 을 다시 쓰고 Nginx 가 잠시 후 다시 읽어 폐기된 인증서를 거부합니다. CA 개인키는 certadmin 컨테이너만 마운트합니다.
+
+`/enroll/<토큰>` 은 클라이언트 인증서 없이 열리지만, 국가 제한은 그대로입니다. 토큰은 256비트 난수이고 해시만 저장되며 기본 10분(`ENROLL_TTL_SECONDS`), 한 번만 쓰입니다. 페이지에서 PKCS#12 를 한 번 받고, 비밀번호와 Windows, macOS, iOS, Android, Linux 설치 안내를 봅니다. `./webtop.sh enroll --name phone --minutes 10` 이 주소를 출력합니다. 발급, 폐기, 등록은 `deploy/logs/certadmin.log` 에 관리자 CN, IP, 국가가 남고 비밀번호와 토큰은 남지 않습니다.
 
 ## mTLS, GeoIP, Compose
 

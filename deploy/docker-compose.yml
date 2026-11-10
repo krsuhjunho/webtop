@@ -45,6 +45,25 @@ services:
     volumes:
       - webtop-geoip:/usr/share/GeoIP
 
+  certadmin:
+    build: ./certadmin
+    image: webtop-certadmin:local
+    container_name: webtop-certadmin
+    restart: unless-stopped
+    environment:
+      CERT_DIR: /certs
+      LOG_PATH: /logs/certadmin.log
+      ADMIN_CNS: ${ADMIN_CNS:-}
+      CERTADMIN_PROXY_SECRET: ${CERTADMIN_PROXY_SECRET:?set CERTADMIN_PROXY_SECRET in deploy/.env}
+      ENROLL_TTL_SECONDS: ${ENROLL_TTL_SECONDS:-600}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+      HTTPS_PORT: ${HTTPS_PORT:-443}
+    volumes:
+      - ./certs:/certs
+      - ./logs:/logs
+    networks:
+      - webtop
+
   nginx:
     build: ./nginx
     image: webtop-nginx:local
@@ -53,15 +72,18 @@ services:
     depends_on:
       - webtop
       - geoipupdate
+      - certadmin
     environment:
       TZ: ${TZ:-Asia/Tokyo}
       ALLOWED_COUNTRIES: ${ALLOWED_COUNTRIES:-KR,JP}
+      ADMIN_CNS: ${ADMIN_CNS:-}
+      CERTADMIN_PROXY_SECRET: ${CERTADMIN_PROXY_SECRET:?set CERTADMIN_PROXY_SECRET in deploy/.env}
       WEBTOP_UPSTREAM: webtop:3000
       HTTPS_PORT: ${HTTPS_PORT:-443}
     ports:
       - "${HTTPS_PORT:-443}:443"
     volumes:
-      - ./certs/ca:/etc/nginx/mtls/ca:ro
+      - ./certs/ca/ca.crt:/etc/nginx/mtls/ca/ca.crt:ro
       - ./certs/server:/etc/nginx/mtls/server:ro
       - ./certs/crl:/etc/nginx/mtls/crl:ro
       - ./logs:/var/log/nginx

@@ -57,11 +57,51 @@ else
   redir="return 301 https://\$host:${https_port}\$request_uri;"
 fi
 
+secret="${CERTADMIN_PROXY_SECRET:-}"
+printf '%s' "$secret" | grep -Eq '^[A-Za-z0-9]{16,128}$' || {
+  echo "CERTADMIN_PROXY_SECRET must be 16-128 letters or digits" >&2
+  exit 1
+}
+
+{
+  echo "map \$ssl_client_cn \$cn_is_admin {"
+  echo "    default 0;"
+  oldifs=$IFS
+  IFS=', '
+  for raw in ${ADMIN_CNS:-}; do
+    cn=$(printf '%s' "$raw" | tr -d ' ')
+    [ -n "$cn" ] || continue
+    printf '%s' "$cn" | grep -Eq '^[A-Za-z0-9._-]{1,64}$' || {
+      echo "ADMIN_CNS has invalid name: ${cn}" >&2
+      exit 1
+    }
+    echo "    ${cn} 1;"
+  done
+  IFS=$oldifs
+  echo "}"
+} > /etc/nginx/admin-cn.conf
+
 sed \
   -e "s#__WEBTOP_UPSTREAM__#${upstream}#g" \
   -e "s#__RESOLVER__#${resolver}#g" \
   -e "s#__HTTPS_REDIRECT__#${redir}#g" \
+  -e "s#__CERTADMIN_SECRET__#${secret}#g" \
   /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf
+
+watch_crl() {
+  last=0
+  while true; do
+    if [ -f /etc/nginx/mtls/crl/ca.crl ]; then
+      now=$(stat -c %Y /etc/nginx/mtls/crl/ca.crl 2>/dev/null || echo 0)
+      if [ "$last" != "0" ] && [ "$now" != "$last" ]; then
+        nginx -s reload || true
+      fi
+      last=$now
+    fi
+    sleep 1
+  done
+}
+watch_crl &
 
 if [ "$#" -eq 0 ]; then
   set -- nginx -g 'daemon off;'
