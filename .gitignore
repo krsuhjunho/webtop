@@ -1,0 +1,6 @@
+deploy/certs/
+deploy/logs/
+deploy/.env
+deploy/secrets/
+*.mmdb
+*.p12

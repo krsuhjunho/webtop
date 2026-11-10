@@ -1,0 +1,13 @@
+// Adapted from linuxserver/docker-webtop (ubuntu-kde), GPL-3.0-only.
+// Members of the sudo group already have passwordless sudo. Grant them
+// polkit actions so pkexec prompts do not block the desktop.
+polkit.addRule(function(action, subject) {
+    if (subject.isInGroup("sudo")) {
+        try {
+            polkit.spawn(["/usr/bin/test", "-x", "/usr/bin/sudo"]);
+            return polkit.Result.YES;
+        } catch (error) {
+            return polkit.Result.NOT_HANDLED;
+        }
+    }
+});

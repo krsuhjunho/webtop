@@ -1,0 +1,35 @@
+#!/bin/bash
+# Brave in this container. The Chromium sandbox needs privileges the
+# container does not have, so --no-sandbox is required here. Give the
+# container --shm-size=2g (and seccomp:unconfined) so the browser can
+# still use shared memory. Wayland text-input v1 is the IME path that
+# works with KWin and fcitx5.
+
+BIN=/usr/bin/brave-browser
+if [ ! -x "$BIN" ] && [ -x /usr/bin/brave-browser-stable ]; then
+  BIN=/usr/bin/brave-browser-stable
+fi
+
+if ! pgrep -x brave >/dev/null 2>&1; then
+  rm -f "$HOME/.config/BraveSoftware/Brave-Browser/Singleton"*
+fi
+
+FLAGS=(
+  --password-store=basic
+  --no-sandbox
+  --test-type
+)
+
+if [ "${PIXELFLUX_WAYLAND,,}" = "true" ]; then
+  FLAGS+=(
+    --ozone-platform=wayland
+    --enable-wayland-ime
+    --wayland-text-input-version=1
+  )
+fi
+
+if [ "${PELORUS,,}" = "true" ]; then
+  FLAGS+=(--force-renderer-accessibility)
+fi
+
+exec "$BIN" "${FLAGS[@]}" "$@"
