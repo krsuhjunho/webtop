@@ -1,0 +1,76 @@
+# Webtop plus an mTLS Nginx front end.
+# Webtop is only on the compose network. The host publishes 80 and 443.
+#
+#   cp deploy/.env.example deploy/.env   # MaxMind account id and license key
+#   ./scripts/gen-certs.sh init
+#   ./scripts/gen-certs.sh server --cn webtop.example.com --san DNS:webtop.example.com,DNS:localhost,IP:127.0.0.1
+#   ./scripts/gen-certs.sh client laptop
+#   docker compose --env-file deploy/.env -f deploy/docker-compose.yml up -d
+
+name: webtop
+
+services:
+  webtop:
+    image: ghcr.io/krsuhjunho/webtop:latest
+    container_name: webtop
+    restart: unless-stopped
+    shm_size: "2gb"
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      TZ: ${TZ:-Asia/Tokyo}
+      LANG: ${LANG:-ko_KR.UTF-8}
+      LANGUAGE: ${LANGUAGE:-ko_KR:ko:ja_JP:ja:en}
+      LC_ALL: ${LC_ALL:-ko_KR.UTF-8}
+      TITLE: ${TITLE:-Webtop}
+    volumes:
+      - webtop-config:/config
+      # Host Docker socket, optional. The image ships the CLI and compose plugin only.
+      # - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - webtop
+
+  geoipupdate:
+    image: ghcr.io/maxmind/geoipupdate
+    container_name: webtop-geoipupdate
+    restart: unless-stopped
+    environment:
+      GEOIPUPDATE_ACCOUNT_ID: ${MAXMIND_ACCOUNT_ID:?set MAXMIND_ACCOUNT_ID in deploy/.env}
+      GEOIPUPDATE_LICENSE_KEY: ${MAXMIND_LICENSE_KEY:?set MAXMIND_LICENSE_KEY in deploy/.env}
+      GEOIPUPDATE_EDITION_IDS: GeoLite2-Country
+      GEOIPUPDATE_FREQUENCY: ${GEOIPUPDATE_FREQUENCY:-72}
+    volumes:
+      - webtop-geoip:/usr/share/GeoIP
+
+  nginx:
+    build: ./nginx
+    image: webtop-nginx:local
+    container_name: webtop-nginx
+    restart: unless-stopped
+    depends_on:
+      - webtop
+      - geoipupdate
+    environment:
+      TZ: ${TZ:-Asia/Tokyo}
+      ALLOWED_COUNTRIES: ${ALLOWED_COUNTRIES:-KR,JP}
+      WEBTOP_UPSTREAM: webtop:3000
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./certs/ca:/etc/nginx/mtls/ca:ro
+      - ./certs/server:/etc/nginx/mtls/server:ro
+      - ./certs/crl:/etc/nginx/mtls/crl:ro
+      - ./logs:/var/log/nginx
+      - webtop-geoip:/usr/share/GeoIP:ro
+    networks:
+      - webtop
+
+networks:
+  webtop:
+
+volumes:
+  webtop-config:
+  webtop-geoip:

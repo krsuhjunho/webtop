@@ -1,0 +1,16 @@
+# Install on the host, for example /etc/logrotate.d/webtop-nginx.
+# Replace the path with the absolute path of deploy/logs.
+# nginx -s reopen needs the container name from docker-compose.yml.
+
+/path/to/webtop/deploy/logs/*.log {
+    weekly
+    rotate 8
+    compress
+    delaycompress
+    missingok
+    notifempty
+    sharedscripts
+    postrotate
+        docker exec webtop-nginx nginx -s reopen >/dev/null 2>&1 || true
+    endscript
+}
