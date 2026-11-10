@@ -73,7 +73,7 @@ docker run -d \
 | 3000 | 컨테이너 안 HTTP. 리버스 프록시는 이 포트로 붙습니다 |
 | 3001 | 컨테이너 안 HTTPS (자체 서명). 직접 접속할 때만 사용 |
 
-mTLS compose 에서는 이 두 포트를 호스트에 바인딩하지 않습니다. Nginx 만 `80` (HTTPS 로 리다이렉트) 과 `443` 을 엽니다.
+mTLS compose 에서는 webtop 의 3000/3001 을 호스트에 바인딩하지 않습니다. Nginx 가 `HTTPS_PORT`(기본 443)를 열고, `HTTP_PORT` 가 비어 있지 않을 때만 HTTP 리다이렉트를 엽니다.
 
 ## 한국어 / 일본어 입력
 
@@ -130,10 +130,17 @@ Selkies 는 캡처용 컴포지터와 KWin 이 중첩이라, 자판에 없는 �
 ./webtop.sh revoke laptop
 ./webtop.sh start
 ./webtop.sh logs nginx
+./webtop.sh check-update
+./webtop.sh update --yes
+./webtop.sh cron-install --schedule '0 6 * * 1' --mode check
 ./webtop.sh install --cn webtop.example.com --name laptop --p12-pass '비밀번호'
 ```
 
-`install` 은 사전 점검, `.env`, CA, 서버 인증서, 클라이언트 인증서, 스택 시작을 순서대로 하고, 이미 끝난 단계는 건너뜁니다. 라이선스 키와 PKCS#12 비밀번호는 메뉴에서 화면에 표시하지 않고 입력받습니다. 스택 명령은 `docker compose --env-file deploy/.env -f deploy/docker-compose.yml` 를 사용합니다.
+`install` 은 도구 확인, `.env`(포트 포함), 선택한 포트 점검, CA, 서버 인증서, 클라이언트 인증서, 스택 시작을 순서대로 하고, 이미 끝난 단계는 건너뜁니다. 443 이 다른 프로세스에 잡혀 있으면 HTTPS 기본값을 8443 으로 제안하고, 80 이 잡혀 있으면 HTTP 리다이렉트를 끌 수 있습니다. 값은 `HTTPS_PORT` 와 `HTTP_PORT`(비우면 HTTP 포트 없음)로 `deploy/.env` 에 저장됩니다. HTTP 를 켤 때만 `deploy/compose.http.yml` 이 함께 적용됩니다. Nginx 의 HTTP 리다이렉트는 443 이 아닐 때 `https://호스트:포트` 로 보냅니다.
+
+`update` 와 `check-update` 는 이 머신의 아키텍처에 해당하는 `ghcr.io/krsuhjunho/webtop:latest` 다이제스트를 실행 중인 컨테이너, 로컬 이미지와 비교합니다. 같으면 받지 않습니다. 다르면 맞는 `yymmdd` 태그를 보여주고, 확인 후 pull 합니다. `cron-install` 은 사용자 crontab 에 `webtop.sh auto-update` 를 넣습니다. 기본은 월요일 06:00 이고, `UPDATE_MODE=check` 이면 로그만, `apply` 이면 새 다이제스트일 때 적용합니다. 잠금은 `flock` 이고 기록은 `deploy/logs/update.log` 입니다.
+
+라이선스 키와 PKCS#12 비밀번호는 메뉴에서 화면에 표시하지 않고 입력받습니다. 스택 명령은 `docker compose --env-file deploy/.env -f deploy/docker-compose.yml` 를 사용합니다.
 
 ## mTLS, GeoIP, Compose
 

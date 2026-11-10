@@ -1,0 +1,5 @@
+# Added by webtop.sh only when HTTP_PORT is set in deploy/.env.
+services:
+  nginx:
+    ports:
+      - "${HTTP_PORT}:80"
