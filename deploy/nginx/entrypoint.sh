@@ -45,9 +45,22 @@ printf '%s' "$upstream" | grep -Eq '^[A-Za-z0-9._:-]+$' || {
 # Override NGINX_RESOLVER when the proxy is not on a compose network.
 resolver="resolver ${NGINX_RESOLVER:-127.0.0.11} valid=10s ipv6=off;"
 
+https_port="${HTTPS_PORT:-443}"
+printf '%s' "$https_port" | grep -Eq '^[0-9]+$' || {
+  echo "HTTPS_PORT is invalid: ${https_port}" >&2
+  exit 1
+}
+if [ "$https_port" = "443" ]; then
+  # shellcheck disable=SC2016 # nginx sees $host, not the shell.
+  redir='return 301 https://$host$request_uri;'
+else
+  redir="return 301 https://\$host:${https_port}\$request_uri;"
+fi
+
 sed \
   -e "s#__WEBTOP_UPSTREAM__#${upstream}#g" \
   -e "s#__RESOLVER__#${resolver}#g" \
+  -e "s#__HTTPS_REDIRECT__#${redir}#g" \
   /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf
 
 if [ "$#" -eq 0 ]; then

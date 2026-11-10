@@ -1,5 +1,6 @@
 # Webtop plus an mTLS Nginx front end.
-# Webtop is only on the compose network. The host publishes 80 and 443.
+# Webtop is only on the compose network. The host publishes HTTPS_PORT (default 443).
+# HTTP_PORT is optional: webtop.sh adds deploy/compose.http.yml when it is set.
 #
 #   cp deploy/.env.example deploy/.env   # MaxMind account id and license key
 #   ./scripts/gen-certs.sh init
@@ -56,9 +57,9 @@ services:
       TZ: ${TZ:-Asia/Tokyo}
       ALLOWED_COUNTRIES: ${ALLOWED_COUNTRIES:-KR,JP}
       WEBTOP_UPSTREAM: webtop:3000
+      HTTPS_PORT: ${HTTPS_PORT:-443}
     ports:
-      - "80:80"
-      - "443:443"
+      - "${HTTPS_PORT:-443}:443"
     volumes:
       - ./certs/ca:/etc/nginx/mtls/ca:ro
       - ./certs/server:/etc/nginx/mtls/server:ro
