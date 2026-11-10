@@ -115,6 +115,26 @@ Selkies 는 캡처용 컴포지터와 KWin 이 중첩이라, 자판에 없는 �
 
 사이드바의 클립보드 칸은 자동 동기화를 껐을 때의 수동 경로입니다.
 
+## 관리 스크립트
+
+루트의 `./webtop.sh` 가 배포에 필요한 일을 한곳에서 처리합니다. 인자 없이 실행하면 한국어 번호 메뉴가 반복되고, 작업을 마친 뒤 Enter 로 메뉴에 돌아옵니다. 같은 일을 명령으로도 실행할 수 있습니다.
+
+```bash
+./webtop.sh                  # 메뉴
+./webtop.sh precheck
+./webtop.sh env --account 123 --license '키' --countries KR,JP
+./webtop.sh ca
+./webtop.sh server --cn webtop.example.com --extra www.webtop.example.com
+./webtop.sh client laptop --p12-pass '비밀번호'
+./webtop.sh list
+./webtop.sh revoke laptop
+./webtop.sh start
+./webtop.sh logs nginx
+./webtop.sh install --cn webtop.example.com --name laptop --p12-pass '비밀번호'
+```
+
+`install` 은 사전 점검, `.env`, CA, 서버 인증서, 클라이언트 인증서, 스택 시작을 순서대로 하고, 이미 끝난 단계는 건너뜁니다. 라이선스 키와 PKCS#12 비밀번호는 메뉴에서 화면에 표시하지 않고 입력받습니다. 스택 명령은 `docker compose --env-file deploy/.env -f deploy/docker-compose.yml` 를 사용합니다.
+
 ## mTLS, GeoIP, Compose
 
 `deploy/docker-compose.yml` 은 webtop, GeoIP 갱신, Nginx 를 띄웁니다. webtop 포트는 공개되지 않습니다.
