@@ -163,9 +163,11 @@ fi
 [[ "$(git -C "$tmp/work" rev-parse HEAD)" == "$shaA" ]] || fail "notify mode changed HEAD"
 
 sed -i 's/^LOGIN_CHECK=notify/LOGIN_CHECK=off/' "$tmp/work/deploy/.env"
+printf '\nLOGIN_SHOW_VERSION=off\n' >>"$tmp/work/deploy/.env"
 off=$(WEBTOP_LOGIN_ASSUME_INTERACTIVE=1 run motd <<<'y' 2>&1 || true)
 [[ -z "$off" ]] || fail "LOGIN_CHECK=off printed: $off"
 sed -i 's/^LOGIN_CHECK=off/LOGIN_CHECK=prompt/' "$tmp/work/deploy/.env"
+sed -i '/^LOGIN_SHOW_VERSION=/d' "$tmp/work/deploy/.env"
 
 # Enter means yes and fast-forwards the checkout. The image is already current.
 cat >"$WEBTOP_LOGIN_CACHE" <<EOF

@@ -171,7 +171,9 @@ usage() {
   start                 스택 시작
   stop                  스택 중지
   restart               스택 재시작
-  status                상태
+  status                상태. 맨 위에 버전 한 줄
+  version               스크립트, 변형, 실행 중 이미지, 캐시된 업데이트 상태
+                        -v, --version 와 같음. --check 는 캐시를 새로 고칩니다
   logs [서비스]         컨테이너 로그. 없으면 all
                         webtop|nginx|geoipupdate|certadmin|filebrowser|all
   access                접속 로그 (access-log 와 같음)
@@ -210,7 +212,7 @@ usage() {
   --profile low-power|balanced|quality
   --variant selkies|kasm  기본은 selkies (:latest). kasm 은 XFCE (:kasm)
   --yes                 업데이트 확인 질문을 생략
-  --check               self-update 는 가져올 커밋만 보여 줍니다
+  --check               self-update 는 가져올 커밋만, version 은 캐시를 새로 고칩니다
   --stash               self-update 전에 추적 파일의 로컬 변경을 stash 합니다
   --prune               적용 후 이전 dangling 이미지 삭제
   --schedule '0 14 * * 1'
@@ -1184,7 +1186,120 @@ cmd_restart() {
   compose restart
 }
 
+version_script_rev() {
+  local sha date
+  if ! git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    printf 'unknown'
+    return 0
+  fi
+  sha=$(git -C "$ROOT" rev-parse --short=7 HEAD 2>/dev/null || true)
+  date=$(git -C "$ROOT" log -1 --format=%cs 2>/dev/null || true)
+  if [[ -z "$sha" || -z "$date" ]]; then
+    printf 'unknown'
+    return 0
+  fi
+  printf '%s (%s)' "$sha" "$date"
+}
+
+version_variant() {
+  local raw variant
+  raw=$(env_get WEBTOP_VARIANT)
+  if ! variant=$(normalize_variant "${raw:-selkies}"); then
+    printf 'unknown'
+    return 0
+  fi
+  printf '%s' "${variant:-selkies}"
+}
+
+version_cache_word() {
+  local repo image
+  if [[ ! -f "$(login_cache_file)" ]]; then
+    printf '확인 안 됨'
+    return 0
+  fi
+  repo=$(login_cache_get repo)
+  image=$(login_cache_get image)
+  if [[ "$repo" == "behind" || "$repo" == "dirty" || "$image" == "behind" ]]; then
+    printf '업데이트 있음'
+    return 0
+  fi
+  if [[ "$repo" == "current" && "$image" == "current" ]]; then
+    printf '최신'
+    return 0
+  fi
+  printf '확인 안 됨'
+}
+
+version_short_digest() {
+  local ref=$1 hex
+  hex=${ref##*sha256:}
+  hex=${hex%%[^0-9a-fA-F]*}
+  if [[ ${#hex} -ge 8 ]]; then
+    printf 'image sha256:%s' "${hex:0:8}"
+    return 0
+  fi
+  printf 'not running'
+}
+
+version_image_field() {
+  local running id repo
+  if ! have docker; then
+    printf 'not running'
+    return 0
+  fi
+  running=$(docker inspect -f '{{.State.Running}}' webtop 2>/dev/null || true)
+  if [[ "$running" != "true" ]]; then
+    printf 'not running'
+    return 0
+  fi
+  id=$(docker inspect -f '{{.Image}}' webtop 2>/dev/null || true)
+  repo=""
+  if [[ -n "$id" ]]; then
+    repo=$(docker image inspect "$id" --format '{{index .RepoDigests 0}}' 2>/dev/null || true)
+  fi
+  if [[ -n "$repo" && "$repo" != "<no value>" ]]; then
+    version_short_digest "$repo"
+    return 0
+  fi
+  version_short_digest "$id"
+}
+
+version_label_value() {
+  local key=$1 value
+  value=$(docker inspect -f "{{index .Config.Labels \"${key}\"}}" webtop 2>/dev/null || true)
+  value=${value//$'\r'/}
+  case "$value" in
+    ""|"<no value>"|null) printf '' ;;
+    *) printf '%s' "$value" ;;
+  esac
+}
+
+version_line() {
+  info "webtop $(version_script_rev) · $(version_variant) · $(version_image_field) · $(version_cache_word)"
+}
+
+version_image_meta() {
+  local rev created
+  [[ "$(version_image_field)" == "not running" ]] && return 0
+  rev=$(version_label_value org.opencontainers.image.revision)
+  created=$(version_label_value org.opencontainers.image.created)
+  [[ -n "$rev" || -n "$created" ]] || return 0
+  if [[ "$rev" =~ ^[0-9a-fA-F]{7,}$ ]]; then
+    rev=${rev:0:7}
+  fi
+  info "image revision ${rev:-unknown} · created ${created:-unknown}"
+}
+
+cmd_version() {
+  if [[ "$OPT_CHECK" -eq 1 ]]; then
+    cmd_login_refresh || true
+  fi
+  version_line
+  version_image_meta
+}
+
 cmd_status() {
+  version_line
   require_env_file || return 1
   warn_root_ids || true
   compose ps
@@ -1574,7 +1689,7 @@ _webtop_complete() {
   local cur
   cur="\${COMP_WORDS[COMP_CWORD]}"
   if [[ \${COMP_CWORD} -eq 1 ]]; then
-    COMPREPLY=( \$(compgen -W "precheck env ca server client enroll list revoke start stop restart status logs access access-log geo-status geo-test profile variant filebrowser self-update upgrade update check-update auto-update cron-install cron-remove cron-status install link motd login-check" -- "\$cur") )
+    COMPREPLY=( \$(compgen -W "precheck env ca server client enroll list revoke start stop restart status logs access access-log geo-status geo-test profile variant filebrowser self-update upgrade update check-update auto-update cron-install cron-remove cron-status install link motd login-check version" -- "\$cur") )
   fi
 }
 complete -F _webtop_complete ${name}
@@ -2195,6 +2310,17 @@ login_check_mode() {
   esac
 }
 
+login_show_version() {
+  local value
+  value=$(env_get LOGIN_SHOW_VERSION)
+  value=${value:-on}
+  value=${value,,}
+  case "$value" in
+    off|false|0|no) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
 login_interval_seconds() {
   local raw
   raw=$(env_get LOGIN_CHECK_INTERVAL)
@@ -2487,17 +2613,21 @@ cmd_login_apply() {
 }
 
 cmd_login_show() {
-  local mode repo image tag suggestion reply timeout
-  mode=$(login_check_mode)
-  [[ "$mode" == "off" ]] && return 0
+  local mode repo image tag suggestion reply timeout pending=0
   login_session_ok || return 0
-  if login_cache_stale; then
+  mode=$(login_check_mode)
+  if [[ "$mode" != "off" ]] && login_cache_stale; then
     login_spawn_refresh
   fi
-  [[ -f "$(login_cache_file)" ]] || return 0
   repo=$(login_cache_get repo)
   image=$(login_cache_get image)
-  [[ "$repo" == "behind" || "$repo" == "dirty" || "$image" == "behind" ]] || return 0
+  if [[ "$mode" != "off" && ( "$repo" == "behind" || "$repo" == "dirty" || "$image" == "behind" ) ]]; then
+    pending=1
+  fi
+  if [[ "$pending" -eq 1 ]] || login_show_version; then
+    version_line
+  fi
+  [[ "$pending" -eq 1 ]] || return 0
   tag=$(login_cache_get tag)
   login_print_pending "$repo" "$image" "$tag"
   suggestion=$(login_suggest_command "$repo" "$image")
@@ -3160,6 +3290,7 @@ main() {
     self-update|upgrade) cmd_self_update self ;;
     motd) cmd_login_show ;;
     login-check) cmd_login_check ;;
+    version|-v|--version) cmd_version ;;
     __after-pull) cmd_after_pull ;;
     *)
       err "알 수 없는 명령: ${cmd}"

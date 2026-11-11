@@ -220,6 +220,8 @@ root 가 아니면 링크를 만들지 않고 sudo 예를 출력합니다. `link
 ./webtop.sh upgrade --stash --yes
 ./webtop.sh login-check status
 ./webtop.sh login-check install
+./webtop.sh version
+./webtop.sh version --check
 ./webtop.sh variant kasm
 ./webtop.sh update --yes
 ./webtop.sh link
@@ -232,7 +234,9 @@ root 가 아니면 링크를 만들지 않고 sudo 예를 출력합니다. `link
 
 `update` 와 `check-update` 는 이 머신의 아키텍처에 해당하는 선택 태그(`IMAGE_TAG`, 기본 `latest`, Kasm 은 `kasm`) 다이제스트를 실행 중인 컨테이너, 로컬 이미지와 비교합니다. 같으면 받지 않습니다. 다르면 맞는 날짜 태그(`yymmdd` 또는 `kasm-yymmdd`)를 보여주고, 확인 후 pull 합니다. `check-update` 는 저장소가 `origin/main` 보다 뒤처졌는지도 함께 보여 줍니다.
 
-대화형 SSH 로그인에서는 저장소나 이미지가 뒤처져 있을 때만 짧은 알림을 냅니다. 기본 `LOGIN_CHECK=prompt` 는 `업데이트를 지금 진행할까요? [Y/n]` 를 묻고, Enter 는 예입니다. 15초 안에 답이 없으면 넘어가고, 다음 확인 시각까지 다시 묻지 않습니다. 예이면 `self-update --yes` 와, 이미지가 뒤처졌으면 `update --yes` 를 이어서 실행합니다. `notify` 는 명령만 보여 주고, `off` 는 끄집니다. 확인 결과는 `deploy/logs/login-check.cache` 에 남고, 기본 6시간(`LOGIN_CHECK_INTERVAL`)이 지나면 다음 로그인에서 백그라운드로 다시 확인합니다. 로그인 셸을 기다리지 않습니다. 비대화형 셸과 scp, sftp 에는 아무것도 내지 않습니다. git 이나 docker 를 실행할 수 없으면 묻지 않고 알림만 냅니다.
+`version`(`-v`, `--version`)은 네트워크 없이 한 줄을 냅니다. 예: `webtop c2351eb (2026-11-11) · kasm · image sha256:ab12cd34 · 최신`. 스크립트 git 커밋과 날짜, `WEBTOP_VARIANT`, 실행 중인 컨테이너 이미지의 짧은 다이제스트, 로그인 확인 캐시의 상태(`최신`, `업데이트 있음`, `확인 안 됨`)입니다. 컨테이너가 없으면 `not running` 입니다. 이미지에 `org.opencontainers.image.revision` 또는 `created` 라벨이 있으면 다음 줄에 보여 줍니다. `version --check` 만 캐시를 새로 고칩니다. `status` 도 같은 한 줄로 시작합니다.
+
+대화형 SSH 로그인에서는 그 한 줄이 먼저 나옵니다. `LOGIN_SHOW_VERSION=on`(기본)이면 최신일 때도 보여주고, `off` 이면 업데이트가 있을 때만 알림의 첫 줄로 나옵니다. 비대화형 셸에는 나오지 않습니다. 저장소나 이미지가 뒤처져 있을 때만 이어서 짧은 알림을 냅니다. 기본 `LOGIN_CHECK=prompt` 는 `업데이트를 지금 진행할까요? [Y/n]` 를 묻고, Enter 는 예입니다. 15초 안에 답이 없으면 넘어가고, 다음 확인 시각까지 다시 묻지 않습니다. 예이면 `self-update --yes` 와, 이미지가 뒤처졌으면 `update --yes` 를 이어서 실행합니다. `notify` 는 명령만 보여 주고, `off` 는 끄집니다. 확인 결과는 `deploy/logs/login-check.cache` 에 남고, 기본 6시간(`LOGIN_CHECK_INTERVAL`)이 지나면 다음 로그인에서 백그라운드로 다시 확인합니다. 로그인 셸을 기다리지 않습니다. 비대화형 셸과 scp, sftp 에는 아무것도 내지 않습니다. git 이나 docker 를 실행할 수 없으면 묻지 않고 알림만 냅니다.
 
 ```bash
 git pull --ff-only
