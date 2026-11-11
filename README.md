@@ -117,7 +117,7 @@ Selkies 는 캡처용 컴포지터와 KWin 이 중첩이라, 자판에 없는 �
 
 ## 관리 스크립트
 
-루트의 `./webtop.sh` 가 배포에 필요한 일을 한곳에서 처리합니다. 인자 없이 실행하면 한국어 번호 메뉴가 반복되고, 작업을 마친 뒤 Enter 로 메뉴에 돌아옵니다. 같은 일을 명령으로도 실행할 수 있습니다.
+루트의 `./webtop.sh` 가 배포에 필요한 일을 한곳에서 처리합니다. 인자 없이 실행하면 한국어 번호 메뉴가 반복되고, 작업을 마친 뒤 Enter 로 메뉴에 돌아옵니다. 같은 일을 명령으로도 실행할 수 있습니다. 메뉴의 로그 보기는 컨테이너 이름(`webtop`, `webtop-nginx`, `webtop-certadmin`, `webtop-geoipupdate`)으로 최근 100줄을 보여주고, 실행 중이면 Ctrl+C 할 때까지 따라갑니다. Ctrl+C 는 스크립트를 끝내지 않고 메뉴로 돌아옵니다. 컨테이너가 없으면 경로와 함께 오류를 냅니다. 접속 로그는 `deploy/logs/access.log` 를 시간, 국가, CN, 요청, 상태로 보여 주고, certadmin 감사 로그와 업데이트 로그도 고를 수 있습니다.
 
 ```bash
 ./webtop.sh                  # 메뉴
@@ -132,6 +132,9 @@ Selkies 는 캡처용 컴포지터와 KWin 이 중첩이라, 자판에 없는 �
 ./webtop.sh revoke laptop
 ./webtop.sh start
 ./webtop.sh logs nginx
+./webtop.sh logs
+./webtop.sh access-log
+./webtop.sh access-log certadmin
 ./webtop.sh check-update
 ./webtop.sh update --yes
 ./webtop.sh cron-install --schedule '0 6 * * 1' --mode check
