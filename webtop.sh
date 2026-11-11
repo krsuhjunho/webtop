@@ -62,6 +62,8 @@ CRONTAB=${CRONTAB:-crontab}
 NONINTERACTIVE=0
 OPT_YES=0
 OPT_PRUNE=0
+OPT_STASH=0
+OPT_CHECK=0
 OPT_HTTP_SET=0
 OPT_ADMIN=0
 FORCE_ADMIN=0
@@ -180,8 +182,9 @@ usage() {
   variant [selkies|kasm] 데스크톱 변형. selkies 는 :latest, kasm 은 :kasm
   filebrowser on|off|status|password
                         선택 파일 브라우저. 기본은 끔
+  self-update           저장소를 origin/main 으로 fast-forward. upgrade 와 같음
   update                선택한 태그에 새 버전이 있을 때만 이미지 업데이트
-  check-update          업데이트 확인만
+  check-update          이미지와 저장소가 뒤처졌는지 확인
   auto-update           cron 용. UPDATE_MODE 에 따라 확인 또는 적용
   cron-install          주간 cron 등록
   cron-remove           주간 cron 제거
@@ -205,8 +208,10 @@ usage() {
   --profile low-power|balanced|quality
   --variant selkies|kasm  기본은 selkies (:latest). kasm 은 XFCE (:kasm)
   --yes                 업데이트 확인 질문을 생략
+  --check               self-update 는 가져올 커밋만 보여 줍니다
+  --stash               self-update 전에 추적 파일의 로컬 변경을 stash 합니다
   --prune               적용 후 이전 dangling 이미지 삭제
-  --schedule '0 6 * * 1'
+  --schedule '0 14 * * 1'
   --mode check|apply
 EOF
 }
@@ -1567,7 +1572,7 @@ _webtop_complete() {
   local cur
   cur="\${COMP_WORDS[COMP_CWORD]}"
   if [[ \${COMP_CWORD} -eq 1 ]]; then
-    COMPREPLY=( \$(compgen -W "precheck env ca server client enroll list revoke start stop restart status logs access access-log geo-status geo-test profile variant filebrowser update check-update auto-update cron-install cron-remove cron-status install link" -- "\$cur") )
+    COMPREPLY=( \$(compgen -W "precheck env ca server client enroll list revoke start stop restart status logs access access-log geo-status geo-test profile variant filebrowser self-update upgrade update check-update auto-update cron-install cron-remove cron-status install link" -- "\$cur") )
   fi
 }
 complete -F _webtop_complete ${name}
@@ -1973,14 +1978,202 @@ report_versions() {
   info "원격 매니페스트: ${REMOTE_ARCH}  날짜 태그: ${REMOTE_DATE:-없음}"
 }
 
+note_update() {
+  mkdir -p "$(dirname "$UPDATE_LOG")"
+  printf '%s %s\n' "$(date -Is)" "$*" >>"$UPDATE_LOG"
+  info "$*"
+}
+
+self_update_enabled() {
+  local value
+  value=$(env_get SELF_UPDATE)
+  value=${value:-on}
+  value=${value,,}
+  [[ "$value" == "on" || "$value" == "true" || "$value" == "1" || "$value" == "yes" ]]
+}
+
+repo_is_git() {
+  git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1
+}
+
+git_repo() {
+  git -C "$ROOT" "$@"
+}
+
+tracked_local_changes() {
+  git_repo status --porcelain --untracked-files=no
+}
+
+rebuild_pulled_services() {
+  local before=$1 after=$2 files nginx=0 cert=0
+  local -a svcs=()
+  [[ "$before" == "$after" ]] && return 0
+  files=$(git_repo diff --name-only "$before" "$after")
+  if printf '%s\n' "$files" | grep -qE '^(deploy/nginx/|deploy/docker-compose\.yml$|deploy/compose\.http\.yml$|deploy/compose\.override\.yml$)'; then
+    nginx=1
+  fi
+  if printf '%s\n' "$files" | grep -qE '^(deploy/certadmin/|deploy/docker-compose\.yml$|deploy/compose\.http\.yml$|deploy/compose\.override\.yml$)'; then
+    cert=1
+  fi
+  [[ "$nginx" -eq 0 && "$cert" -eq 0 ]] && return 0
+  if ! have docker; then
+    note_update "docker 가 없어 nginx/certadmin 을 다시 만들지 않았습니다."
+    return 0
+  fi
+  if [[ "$nginx" -eq 1 ]] && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx webtop-nginx; then
+    svcs+=(nginx)
+  fi
+  if [[ "$cert" -eq 1 ]] && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx webtop-certadmin; then
+    svcs+=(certadmin)
+  fi
+  if [[ ${#svcs[@]} -eq 0 ]]; then
+    note_update "nginx 또는 certadmin 설정이 바뀌었습니다. 스택이 없어 다음에 시작할 때 적용됩니다."
+    return 0
+  fi
+  note_update "다시 만듭니다: ${svcs[*]}"
+  compose up -d --build --no-deps "${svcs[@]}"
+}
+
+maybe_reexec_after_pull() {
+  local before=$1 after=$2 next_step=$3 files
+  files=$(git_repo diff --name-only "$before" "$after")
+  if printf '%s\n' "$files" | grep -qx 'webtop.sh' && [[ "${WEBTOP_REEXECED:-}" != "1" ]]; then
+    note_update "새 webtop.sh 로 이어서 실행합니다."
+    export WEBTOP_REEXECED=1
+    export WEBTOP_PULL_BEFORE=$before
+    export WEBTOP_PULL_AFTER=$after
+    export WEBTOP_AFTER_PULL=$next_step
+    exec "$SCRIPT_PATH" __after-pull
+  fi
+}
+
+cmd_after_pull() {
+  local before=${WEBTOP_PULL_BEFORE:-} after=${WEBTOP_PULL_AFTER:-} next_step=${WEBTOP_AFTER_PULL:-self}
+  [[ -n "$before" && -n "$after" ]] || { err "가져온 커밋 범위가 없습니다."; return 1; }
+  rebuild_pulled_services "$before" "$after" || return 1
+  if [[ "$next_step" == "auto" ]]; then
+    OPT_YES=1
+    cmd_update
+  fi
+}
+
+# 0 current, 10 behind and fast-forwardable, 1 blocked or error.
+cmd_repo_check() {
+  local dirty behind ahead branch line
+  have git || { err "git 이 없습니다."; return 1; }
+  if ! repo_is_git; then
+    warn "git 저장소가 아닙니다: ${ROOT}"
+    return 1
+  fi
+  note_update "저장소 ${ROOT} 에서 origin/main 을 가져옵니다."
+  if ! GIT_TERMINAL_PROMPT=0 git_repo fetch origin main; then
+    err "git fetch origin main 에 실패했습니다."
+    return 1
+  fi
+  if ! git_repo rev-parse --verify --quiet origin/main >/dev/null; then
+    err "origin/main 이 없습니다."
+    return 1
+  fi
+  dirty=$(tracked_local_changes || true)
+  if [[ -n "$dirty" ]]; then
+    warn "추적 중인 파일에 로컬 변경이 있습니다. 버리지 않습니다."
+    printf '%s\n' "$dirty"
+  fi
+  branch=$(git_repo rev-parse --abbrev-ref HEAD)
+  behind=$(git_repo rev-list --count HEAD..origin/main)
+  ahead=$(git_repo rev-list --count origin/main..HEAD)
+  if [[ "$behind" == "0" && "$ahead" == "0" ]]; then
+    ok "저장소는 origin/main 과 같습니다."
+    return 0
+  fi
+  if [[ "$ahead" != "0" && "$behind" != "0" ]]; then
+    err "로컬 ${branch} 가 origin/main 과 갈라져 있습니다. fast-forward 하지 않습니다."
+    return 1
+  fi
+  if [[ "$ahead" != "0" ]]; then
+    warn "로컬 ${branch} 에 origin/main 에 없는 커밋이 ${ahead}개 있습니다. 덮어쓰지 않습니다."
+    return 1
+  fi
+  note_update "origin/main 이 ${behind} 커밋 앞섭니다."
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    note_update "  $line"
+  done < <(git_repo log --oneline HEAD..origin/main)
+  if [[ "$branch" != "main" ]]; then
+    err "현재 브랜치는 ${branch} 입니다. main 에서만 fast-forward 합니다."
+    return 1
+  fi
+  if [[ -n "$dirty" ]]; then
+    return 2
+  fi
+  return 10
+}
+
+cmd_self_update() {
+  local next_step=${1:-self} rc=0 before after answer
+  if [[ "${WEBTOP_SKIP_SELF_UPDATE:-}" == "1" ]]; then
+    return 0
+  fi
+  cmd_repo_check || rc=$?
+  if [[ "$OPT_CHECK" -eq 1 || "$next_step" == "check" ]]; then
+    if [[ "$rc" -eq 10 || "$rc" -eq 2 ]]; then
+      note_update "check 모드라 저장소를 적용하지 않습니다."
+      return 10
+    fi
+    return "$rc"
+  fi
+  if [[ "$rc" -eq 0 ]]; then
+    return 0
+  fi
+  if [[ "$rc" -eq 2 ]]; then
+    if [[ "$OPT_STASH" -eq 1 ]]; then
+      note_update "추적 파일의 로컬 변경을 stash 합니다. 추적되지 않은 파일은 그대로입니다."
+      git_repo stash push -m "webtop self-update" || return 1
+      ok "stash 했습니다. 끝난 뒤 git -C ${ROOT} stash pop 으로 되돌리세요."
+    else
+      err "로컬 변경이 있어 fast-forward 하지 않습니다. --stash 로 잠시 넣거나 직접 정리하세요."
+      return 1
+    fi
+  elif [[ "$rc" -ne 10 ]]; then
+    return "$rc"
+  fi
+  if [[ "$NONINTERACTIVE" -eq 1 && "$OPT_YES" -ne 1 ]]; then
+    err "저장소를 적용하려면 --yes 를 붙이세요."
+    return 10
+  fi
+  if [[ "$NONINTERACTIVE" -eq 0 && "$OPT_YES" -ne 1 ]]; then
+    answer=$(prompt "저장소를 fast-forward 할까요? (y/N)" "N")
+    [[ "$answer" == "y" || "$answer" == "Y" ]] || { info "취소했습니다."; return 0; }
+  fi
+  before=$(git_repo rev-parse HEAD)
+  if ! GIT_TERMINAL_PROMPT=0 git_repo pull --ff-only origin main; then
+    err "git pull --ff-only origin main 에 실패했습니다."
+    return 1
+  fi
+  after=$(git_repo rev-parse HEAD)
+  note_update "저장소를 ${before} 에서 ${after} 로 맞췄습니다."
+  maybe_reexec_after_pull "$before" "$after" "$next_step"
+  rebuild_pulled_services "$before" "$after"
+}
+
 cmd_check_update() {
+  local part=${1:-all} repo_rc=0
+  if [[ "$part" != "image" ]]; then
+    cmd_repo_check || repo_rc=$?
+    if ! self_update_enabled; then
+      info "SELF_UPDATE=off 이라 자동 적용은 하지 않습니다."
+    fi
+  fi
   have docker || { err "docker 가 없습니다."; return 1; }
   info "원격 이미지를 확인합니다."
   remote_release || { err "GHCR 에서 $(image_tag_for_update) 를 읽지 못했습니다."; return 1; }
   collect_local_image
   report_versions
   if images_current; then
-    ok "최신입니다."
+    ok "이미지는 최신입니다."
+    if [[ "$repo_rc" -eq 10 || "$repo_rc" -eq 2 ]]; then
+      return 10
+    fi
     return 0
   fi
   warn "새 버전이 있습니다."
@@ -1996,7 +2189,7 @@ cmd_update() {
   local answer
   require_env_file || return 1
   offer_fix_root_ids || return 1
-  cmd_check_update
+  cmd_check_update image
   local rc=$?
   if [[ "$rc" -eq 0 ]]; then
     return 0
@@ -2038,21 +2231,33 @@ cmd_auto_update() {
       info "다른 업데이트가 실행 중입니다."
       return 0
     fi
+    export WEBTOP_FLOCKED=1
   fi
   mode=$(env_get UPDATE_MODE)
   mode=${mode:-check}
-  info "===== $(date -Is) auto-update mode=${mode} ====="
+  note_update "===== auto-update mode=${mode} self=$(env_get SELF_UPDATE) ====="
+  if self_update_enabled; then
+    if [[ "$mode" == "apply" ]]; then
+      OPT_YES=1
+      cmd_self_update auto || true
+    else
+      cmd_self_update check || true
+    fi
+  else
+    note_update "SELF_UPDATE=off 이라 저장소는 건너뜁니다."
+  fi
   if [[ "$mode" == "apply" ]]; then
     OPT_YES=1
     cmd_update
     return $?
   fi
-  cmd_check_update || true
+  cmd_check_update image || true
   return 0
 }
 
 cron_marker='# webtop-managed'
-cron_schedule_default='0 6 * * 1'
+# Monday 14:00 local, after the image build at Monday 03:17 UTC (12:17 JST).
+cron_schedule_default='0 14 * * 1'
 
 valid_schedule() {
   local text=$1 words
@@ -2239,6 +2444,7 @@ draw_menu() {
 22) 성능 프로파일
 23) 데스크톱 변형
 24) 파일 브라우저
+25) 스크립트 업데이트
  0) 종료
 EOF
 }
@@ -2276,6 +2482,7 @@ menu_once() {
       fi
       cmd_filebrowser || true
       ;;
+    25) cmd_self_update self || true ;;
     0|q|Q|exit) return 10 ;;
     "") ;;
     *) err "없는 번호입니다: ${choice}" ;;
@@ -2319,6 +2526,8 @@ parse_opts() {
       --schedule) OPT_SCHEDULE=$2; shift 2 ;;
       --mode) OPT_MODE=$2; shift 2 ;;
       --yes) OPT_YES=1; shift ;;
+      --stash) OPT_STASH=1; shift ;;
+      --check) OPT_CHECK=1; shift ;;
       --prune) OPT_PRUNE=1; shift ;;
       --admin) OPT_ADMIN=1; shift ;;
       --minutes) OPT_MINUTES=$2; shift 2 ;;
@@ -2398,6 +2607,8 @@ main() {
     variant) cmd_variant ;;
     filebrowser) cmd_filebrowser ;;
     link) cmd_link ;;
+    self-update|upgrade) cmd_self_update self ;;
+    __after-pull) cmd_after_pull ;;
     *)
       err "알 수 없는 명령: ${cmd}"
       usage

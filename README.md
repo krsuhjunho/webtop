@@ -215,17 +215,24 @@ root 가 아니면 링크를 만들지 않고 sudo 예를 출력합니다. `link
 ./webtop.sh access-log
 ./webtop.sh access-log certadmin
 ./webtop.sh check-update
+./webtop.sh self-update --check
+./webtop.sh self-update --yes
+./webtop.sh upgrade --stash --yes
 ./webtop.sh variant kasm
 ./webtop.sh update --yes
 ./webtop.sh link
 ./webtop.sh link
-./webtop.sh cron-install --schedule '0 6 * * 1' --mode check
+./webtop.sh cron-install --schedule '0 14 * * 1' --mode check
 ./webtop.sh install --cn webtop.example.com --name laptop --p12-pass '비밀번호'
 ```
 
 `install` 은 도구 확인, `.env`(포트 포함), 선택한 포트 점검, CA, 서버 인증서, 클라이언트 인증서, 스택 시작을 순서대로 하고, 이미 끝난 단계는 건너뜁니다. 443 이 다른 프로세스에 잡혀 있으면 HTTPS 기본값을 8443 으로 제안하고, 80 이 잡혀 있으면 HTTP 리다이렉트를 끌 수 있습니다. 값은 `HTTPS_PORT` 와 `HTTP_PORT`(비우면 HTTP 포트 없음)로 `deploy/.env` 에 저장됩니다. HTTP 를 켤 때만 `deploy/compose.http.yml` 이 함께 적용됩니다. Nginx 의 HTTP 리다이렉트는 443 이 아닐 때 `https://호스트:포트` 로 보냅니다.
 
-`update` 와 `check-update` 는 이 머신의 아키텍처에 해당하는 선택 태그(`IMAGE_TAG`, 기본 `latest`, Kasm 은 `kasm`) 다이제스트를 실행 중인 컨테이너, 로컬 이미지와 비교합니다. 같으면 받지 않습니다. 다르면 맞는 날짜 태그(`yymmdd` 또는 `kasm-yymmdd`)를 보여주고, 확인 후 pull 합니다. `cron-install` 은 사용자 crontab 에 `webtop.sh auto-update` 를 넣습니다. 기본은 월요일 06:00 이고, `UPDATE_MODE=check` 이면 로그만, `apply` 이면 새 다이제스트일 때 적용합니다. 잠금은 `flock` 이고 기록은 `deploy/logs/update.log` 입니다.
+`update` 와 `check-update` 는 이 머신의 아키텍처에 해당하는 선택 태그(`IMAGE_TAG`, 기본 `latest`, Kasm 은 `kasm`) 다이제스트를 실행 중인 컨테이너, 로컬 이미지와 비교합니다. 같으면 받지 않습니다. 다르면 맞는 날짜 태그(`yymmdd` 또는 `kasm-yymmdd`)를 보여주고, 확인 후 pull 합니다. `check-update` 는 저장소가 `origin/main` 보다 뒤처졌는지도 함께 보여 줍니다.
+
+`self-update`(`upgrade` 와 같음)는 이 체크아웃을 `origin/main` 으로 fast-forward 합니다. `git fetch` 뒤 들어올 커밋을 보여주고, `git pull --ff-only` 만 합니다. 추적 중인 파일에 로컬 변경이 있으면 그 목록을 출력하고 멈추며, 버리지 않습니다. `--stash` 는 그 추적 파일만 `git stash` 하고, `deploy/.env`, `compose.override.yml`, 인증서, `filebrowser-data` 처럼 추적되지 않은 파일은 그대로 둡니다. 가져온 범위에서 Nginx 또는 certadmin 빌드 맥락이나 compose 파일이 바뀌었고 그 컨테이너가 있으면 해당 서비스만 다시 만듭니다. `webtop.sh` 가 바뀌면 새 스크립트를 다시 실행해 이어서 처리합니다. `--check` 는 적용하지 않습니다.
+
+`cron-install` 은 사용자 crontab 에 `webtop.sh auto-update` 를 넣습니다. 기본 시각은 월요일 14:00(로컬)입니다. 이미지 CI 는 월요일 03:17 UTC(12:17 JST)에 돌므로, 그 빌드가 끝난 뒤에 확인합니다. 이미 등록된 설치는 예전 식(월요일 06:00)을 유지하므로 `./webtop.sh cron-install` 을 다시 실행해야 14:00 으로 바뀝니다. `UPDATE_MODE=check` 이면 로그만, `apply` 이면 적용합니다. `SELF_UPDATE=on`(기본)이면 이미지를 보기 전에 저장소부터 맞추고, `off` 이면 저장소는 건너뜁니다. check 모드의 저장소 갱신도 보고만 합니다. 잠금은 `flock` 이고 기록은 `deploy/logs/update.log` 입니다.
 
 라이선스 키와 PKCS#12 비밀번호는 메뉴에서 화면에 표시하지 않고 입력받습니다. 스택 명령은 `docker compose --env-file deploy/.env -f deploy/docker-compose.yml` 를 사용합니다. `HTTP_PORT` 가 있으면 `deploy/compose.http.yml` 을 뒤에 붙입니다. `deploy/compose.override.yml` 이 있으면 그것도 마지막에 붙입니다. `-f` 를 직접 주면 Compose 가 override 를 자동으로 읽지 않으므로, `webtop.sh` 가 파일이 있을 때만 넣습니다.
 
