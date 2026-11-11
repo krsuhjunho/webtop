@@ -185,11 +185,13 @@ usage() {
   self-update           저장소를 origin/main 으로 fast-forward. upgrade 와 같음
   update                선택한 태그에 새 버전이 있을 때만 이미지 업데이트
   check-update          이미지와 저장소가 뒤처졌는지 확인
+  motd                  로그인 알림. 오래됐으면 지금 업데이트할지 묻습니다
+  login-check           motd 와 같음. install, uninstall, status, refresh
   auto-update           cron 용. UPDATE_MODE 에 따라 확인 또는 적용
   cron-install          주간 cron 등록
   cron-remove           주간 cron 제거
   cron-status           주간 cron 상태
-  link [이름]           /usr/local/bin 에 이 스크립트 링크. 기본 이름은 webtop
+  link [이름]           /usr/local/bin 링크와 로그인 알림. 기본 이름은 webtop
   install               전체 자동 설치
 
 옵션:
@@ -1572,7 +1574,7 @@ _webtop_complete() {
   local cur
   cur="\${COMP_WORDS[COMP_CWORD]}"
   if [[ \${COMP_CWORD} -eq 1 ]]; then
-    COMPREPLY=( \$(compgen -W "precheck env ca server client enroll list revoke start stop restart status logs access access-log geo-status geo-test profile variant filebrowser self-update upgrade update check-update auto-update cron-install cron-remove cron-status install link" -- "\$cur") )
+    COMPREPLY=( \$(compgen -W "precheck env ca server client enroll list revoke start stop restart status logs access access-log geo-status geo-test profile variant filebrowser self-update upgrade update check-update auto-update cron-install cron-remove cron-status install link motd login-check" -- "\$cur") )
   fi
 }
 complete -F _webtop_complete ${name}
@@ -1600,6 +1602,7 @@ cmd_link() {
   ln -sfn "$SCRIPT_PATH" "$dest"
   ok "링크를 만들었습니다: ${dest} -> ${SCRIPT_PATH}"
   write_bash_completion "$name"
+  cmd_login_install || true
 }
 
 cmd_filebrowser() {
@@ -1831,15 +1834,23 @@ host_arch() {
   esac
 }
 
+http_get() {
+  if [[ "${WEBTOP_LOGIN_REFRESH:-}" == "1" ]]; then
+    curl --max-time "${WEBTOP_LOGIN_HTTP_TIMEOUT:-10}" "$@"
+  else
+    curl "$@"
+  fi
+}
+
 ghcr_token() {
   local body
-  body=$(curl -fsSL "https://ghcr.io/token?service=ghcr.io&scope=repository:krsuhjunho/webtop:pull") || return 1
+  body=$(http_get -fsSL "https://ghcr.io/token?service=ghcr.io&scope=repository:krsuhjunho/webtop:pull") || return 1
   printf '%s' "$body" | sed -n 's/.*"token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'
 }
 
 ghcr_manifest() {
   local token=$1 ref=$2 accept=$3
-  curl -fsSL \
+  http_get -fsSL \
     -H "Authorization: Bearer ${token}" \
     -H "Accept: ${accept}" \
     "https://ghcr.io/v2/krsuhjunho/webtop/manifests/${ref}"
@@ -1847,7 +1858,7 @@ ghcr_manifest() {
 
 ghcr_digest_header() {
   local token=$1 ref=$2
-  curl -fsSL -D - -o /dev/null \
+  http_get -fsSL -D - -o /dev/null \
     -H "Authorization: Bearer ${token}" \
     -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json" \
     "https://ghcr.io/v2/krsuhjunho/webtop/manifests/${ref}" \
@@ -1886,6 +1897,10 @@ remote_release() {
     in_config && match($0, /sha256:[0-9a-f]+/) { print substr($0, RSTART, RLENGTH); exit }
   ')
   [[ -n "$REMOTE_CONFIG" ]] || return 1
+  if [[ "${WEBTOP_LOGIN_REFRESH:-}" == "1" ]]; then
+    REMOTE_DATE=""
+    return 0
+  fi
   prefix=$(date_prefix_for_tag "$tag")
   REMOTE_DATE=$(date_tag_for_index "$token" "$REMOTE_INDEX" "$prefix")
 }
@@ -1893,7 +1908,7 @@ remote_release() {
 date_tag_for_index() {
   local token=$1 want=$2 prefix=${3:-} tags tag digest pattern
   local -a patterns=()
-  tags=$(curl -fsSL -H "Authorization: Bearer ${token}" "https://ghcr.io/v2/krsuhjunho/webtop/tags/list") || return 0
+  tags=$(http_get -fsSL -H "Authorization: Bearer ${token}" "https://ghcr.io/v2/krsuhjunho/webtop/tags/list") || return 0
   if [[ "$prefix" == "kasm" ]]; then
     patterns=('kasm-[0-9]{6}')
   else
@@ -2048,13 +2063,17 @@ maybe_reexec_after_pull() {
 }
 
 cmd_after_pull() {
-  local before=${WEBTOP_PULL_BEFORE:-} after=${WEBTOP_PULL_AFTER:-} next_step=${WEBTOP_AFTER_PULL:-self}
+  local before=${WEBTOP_PULL_BEFORE:-} after=${WEBTOP_PULL_AFTER:-} next_step=${WEBTOP_AFTER_PULL:-self} update_rc=0
   [[ -n "$before" && -n "$after" ]] || { err "가져온 커밋 범위가 없습니다."; return 1; }
   rebuild_pulled_services "$before" "$after" || return 1
   if [[ "$next_step" == "auto" ]]; then
     OPT_YES=1
-    cmd_update
+    cmd_update || update_rc=$?
   fi
+  if [[ "${WEBTOP_LOGIN_APPLY:-}" == "1" ]]; then
+    WEBTOP_LOGIN_REFRESH=1 cmd_login_refresh || true
+  fi
+  return "$update_rc"
 }
 
 # 0 current, 10 behind and fast-forwardable, 1 blocked or error.
@@ -2066,7 +2085,7 @@ cmd_repo_check() {
     return 1
   fi
   note_update "저장소 ${ROOT} 에서 origin/main 을 가져옵니다."
-  if ! GIT_TERMINAL_PROMPT=0 git_repo fetch origin main; then
+  if ! login_git_fetch; then
     err "git fetch origin main 에 실패했습니다."
     return 1
   fi
@@ -2154,6 +2173,537 @@ cmd_self_update() {
   note_update "저장소를 ${before} 에서 ${after} 로 맞췄습니다."
   maybe_reexec_after_pull "$before" "$after" "$next_step"
   rebuild_pulled_services "$before" "$after"
+}
+
+login_git_fetch() {
+  if [[ "${WEBTOP_LOGIN_REFRESH:-}" == "1" ]] && have timeout; then
+    GIT_TERMINAL_PROMPT=0 timeout 20 git -C "$ROOT" fetch origin main
+  else
+    GIT_TERMINAL_PROMPT=0 git_repo fetch origin main
+  fi
+}
+
+login_check_mode() {
+  local value
+  value=$(env_get LOGIN_CHECK)
+  value=${value:-prompt}
+  value=${value,,}
+  case "$value" in
+    off|false|0|no) printf 'off' ;;
+    notify|notice) printf 'notify' ;;
+    *) printf 'prompt' ;;
+  esac
+}
+
+login_interval_seconds() {
+  local raw
+  raw=$(env_get LOGIN_CHECK_INTERVAL)
+  raw=${raw:-6}
+  if [[ "$raw" =~ ^[0-9]+$ && "$raw" -gt 0 ]]; then
+    printf '%s' $((raw * 3600))
+  else
+    printf '21600'
+  fi
+}
+
+login_prompt_seconds() {
+  local raw
+  raw=$(env_get LOGIN_CHECK_TIMEOUT)
+  raw=${raw:-15}
+  if [[ "$raw" =~ ^[0-9]+$ && "$raw" -gt 0 ]]; then
+    printf '%s' "$raw"
+  else
+    printf '15'
+  fi
+}
+
+login_cache_file() {
+  local dir
+  if [[ -n "${WEBTOP_LOGIN_CACHE:-}" ]]; then
+    printf '%s' "$WEBTOP_LOGIN_CACHE"
+    return 0
+  fi
+  dir="$ROOT/deploy/logs"
+  if { [[ -d "$dir" && -w "$dir" ]] || mkdir -p "$dir" 2>/dev/null; } && [[ -w "$dir" ]]; then
+    printf '%s' "$dir/login-check.cache"
+    return 0
+  fi
+  dir="${HOME:-/tmp}/.cache/webtop"
+  mkdir -p "$dir" 2>/dev/null || true
+  printf '%s' "$dir/login-check"
+}
+
+login_cache_get() {
+  local key=$1 file line
+  file=$(login_cache_file)
+  [[ -f "$file" ]] || return 0
+  line=$(grep -E "^${key}=" "$file" | tail -n 1 || true)
+  printf '%s' "${line#"${key}"=}"
+}
+
+login_session_ok() {
+  [[ "${WEBTOP_LOGIN_ASSUME_INTERACTIVE:-}" == "1" ]] && return 0
+  [[ -t 0 && -t 1 ]] || return 1
+  return 0
+}
+
+login_can_git() {
+  have git || return 1
+  repo_is_git || return 1
+  [[ -w "$ROOT/.git" || -w "$ROOT" ]]
+}
+
+login_can_docker() {
+  have docker || return 1
+  [[ "$(id -u)" -eq 0 || -w /var/run/docker.sock ]]
+}
+
+login_command_name() {
+  if have webtop; then
+    printf 'webtop'
+  else
+    printf '%s' "$SCRIPT_PATH"
+  fi
+}
+
+login_suggest_command() {
+  local repo=$1 image=$2 bin text=""
+  bin=$(login_command_name)
+  if [[ "$repo" == "behind" ]]; then
+    text="${bin} self-update --yes"
+  elif [[ "$repo" == "dirty" ]]; then
+    text="${bin} self-update --stash --yes"
+  fi
+  if [[ "$image" == "behind" ]]; then
+    if [[ -n "$text" ]]; then
+      text="${text} && ${bin} update --yes"
+    else
+      text="${bin} update --yes"
+    fi
+  fi
+  printf '%s' "$text"
+}
+
+login_can_apply() {
+  local repo image
+  repo=$(login_cache_get repo)
+  image=$(login_cache_get image)
+  if [[ "$repo" == "behind" ]] && ! login_can_git; then
+    return 1
+  fi
+  if [[ "$image" == "behind" ]] && ! login_can_docker; then
+    return 1
+  fi
+  # A dirty checkout is not fast-forwarded from the login prompt.
+  if [[ "$repo" == "dirty" ]]; then
+    return 1
+  fi
+  [[ "$repo" == "behind" || "$image" == "behind" ]]
+}
+
+login_skip_active() {
+  local now fp key until
+  fp=$(login_cache_get fingerprint)
+  key=$(login_cache_get skip_key)
+  until=$(login_cache_get skip_until)
+  [[ -n "$fp" && "$key" == "$fp" ]] || return 1
+  [[ "$until" =~ ^[0-9]+$ ]] || return 1
+  now=$(date +%s)
+  (( now < until ))
+}
+
+login_write_cache() {
+  local file tmp now fp repo_state=$1 repo_tip=$2 image_state=$3 image_id=$4 tag=$5
+  local skip_key=${6-} skip_until=${7-}
+  file=$(login_cache_file)
+  mkdir -p "$(dirname "$file")" || return 0
+  now=$(date +%s)
+  fp="${repo_tip}:${image_id}"
+  if [[ -z "$skip_key" && "$(login_cache_get fingerprint)" == "$fp" ]]; then
+    skip_key=$(login_cache_get skip_key)
+    skip_until=$(login_cache_get skip_until)
+  fi
+  skip_until=${skip_until:-0}
+  tmp=$(mktemp "${file}.XXXXXX")
+  cat >"$tmp" <<EOF
+checked_at=${now}
+repo=${repo_state}
+repo_tip=${repo_tip}
+image=${image_state}
+image_id=${image_id}
+tag=${tag}
+fingerprint=${fp}
+skip_key=${skip_key}
+skip_until=${skip_until}
+EOF
+  chmod 644 "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$file"
+}
+
+login_remember_skip() {
+  local fp now until file tmp key line
+  file=$(login_cache_file)
+  [[ -f "$file" ]] || return 0
+  fp=$(login_cache_get fingerprint)
+  [[ -n "$fp" ]] || return 0
+  now=$(date +%s)
+  until=$((now + $(login_interval_seconds)))
+  tmp=$(mktemp "${file}.XXXXXX")
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    key=${line%%=*}
+    case "$key" in
+      skip_key) printf 'skip_key=%s\n' "$fp" ;;
+      skip_until) printf 'skip_until=%s\n' "$until" ;;
+      *) printf '%s\n' "$line" ;;
+    esac
+  done <"$file" >"$tmp"
+  if ! grep -q '^skip_key=' "$tmp"; then
+    printf 'skip_key=%s\nskip_until=%s\n' "$fp" "$until" >>"$tmp"
+  fi
+  chmod 644 "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$file"
+}
+
+login_cache_stale() {
+  local checked now interval
+  [[ -f "$(login_cache_file)" ]] || return 0
+  checked=$(login_cache_get checked_at)
+  [[ "$checked" =~ ^[0-9]+$ ]] || return 0
+  now=$(date +%s)
+  interval=$(login_interval_seconds)
+  (( now - checked >= interval ))
+}
+
+login_spawn_refresh() {
+  if have timeout; then
+    nohup timeout 60 "$SCRIPT_PATH" login-check refresh >/dev/null 2>&1 &
+  else
+    nohup "$SCRIPT_PATH" login-check refresh >/dev/null 2>&1 &
+  fi
+  disown 2>/dev/null || true
+}
+
+login_image_status() {
+  have docker || return 1
+  remote_release || return 1
+  collect_local_image
+  if images_current; then
+    return 0
+  fi
+  return 10
+}
+
+cmd_login_refresh() {
+  local repo_rc=0 image_rc=0 repo_state=unknown repo_tip="" image_state=unknown image_id="" tag lock
+  export WEBTOP_LOGIN_REFRESH=1
+  lock="$(login_cache_file).lock"
+  mkdir -p "$(dirname "$lock")" || return 0
+  if have flock; then
+    exec 7>>"$lock"
+    if ! flock -n 7; then
+      return 0
+    fi
+  fi
+  if cmd_repo_check >/dev/null 2>&1; then
+    repo_rc=0
+  else
+    repo_rc=$?
+  fi
+  case "$repo_rc" in
+    0)
+      repo_state=current
+      repo_tip=$(git_repo rev-parse HEAD 2>/dev/null || true)
+      ;;
+    10)
+      repo_state=behind
+      repo_tip=$(git_repo rev-parse origin/main 2>/dev/null || true)
+      ;;
+    2)
+      repo_state=dirty
+      repo_tip=$(git_repo rev-parse origin/main 2>/dev/null || true)
+      ;;
+    *)
+      repo_state=unknown
+      ;;
+  esac
+  tag=$(image_tag_for_update 2>/dev/null || true)
+  if login_image_status >/dev/null 2>&1; then
+    image_rc=0
+  else
+    image_rc=$?
+  fi
+  case "$image_rc" in
+    0)
+      image_state=current
+      image_id=${REMOTE_CONFIG:-}
+      ;;
+    10)
+      image_state=behind
+      image_id=${REMOTE_CONFIG:-}
+      ;;
+    *)
+      image_state=unknown
+      ;;
+  esac
+  login_write_cache "$repo_state" "$repo_tip" "$image_state" "$image_id" "$tag"
+}
+
+login_notice() {
+  if [[ -t 1 ]]; then
+    printf '%s%s%s\n' "$C_YELLOW" "$*" "$C_OFF"
+  else
+    printf '%s\n' "$*"
+  fi
+}
+
+login_print_pending() {
+  local repo=$1 image=$2 tag=$3
+  if [[ "$repo" == "behind" ]]; then
+    login_notice "webtop 저장소 업데이트가 있습니다."
+  elif [[ "$repo" == "dirty" ]]; then
+    login_notice "webtop 저장소 업데이트가 있지만 추적 파일에 로컬 변경이 있습니다."
+  fi
+  if [[ "$image" == "behind" ]]; then
+    login_notice "webtop 이미지 업데이트가 있습니다 (${tag:-latest})."
+  fi
+}
+
+cmd_login_apply() {
+  local repo image
+  repo=$(login_cache_get repo)
+  image=$(login_cache_get image)
+  OPT_YES=1
+  export WEBTOP_LOGIN_APPLY=1
+  if [[ "$repo" == "behind" ]] && login_can_git; then
+    cmd_self_update auto || true
+  fi
+  if [[ "${WEBTOP_LOGIN_APPLY:-}" == "1" && "$image" == "behind" ]] && login_can_docker; then
+    OPT_YES=1
+    cmd_update || true
+  fi
+  if [[ "${WEBTOP_LOGIN_APPLY:-}" == "1" ]]; then
+    WEBTOP_LOGIN_REFRESH=1 cmd_login_refresh || true
+  fi
+}
+
+cmd_login_show() {
+  local mode repo image tag suggestion reply timeout
+  mode=$(login_check_mode)
+  [[ "$mode" == "off" ]] && return 0
+  login_session_ok || return 0
+  if login_cache_stale; then
+    login_spawn_refresh
+  fi
+  [[ -f "$(login_cache_file)" ]] || return 0
+  repo=$(login_cache_get repo)
+  image=$(login_cache_get image)
+  [[ "$repo" == "behind" || "$repo" == "dirty" || "$image" == "behind" ]] || return 0
+  tag=$(login_cache_get tag)
+  login_print_pending "$repo" "$image" "$tag"
+  suggestion=$(login_suggest_command "$repo" "$image")
+  if [[ "$mode" != "prompt" ]] || ! login_can_apply || login_skip_active; then
+    [[ -n "$suggestion" ]] && info "나중에 실행: ${suggestion}"
+    return 0
+  fi
+  timeout=$(login_prompt_seconds)
+  reply=""
+  printf '업데이트를 지금 진행할까요? [Y/n] '
+  if ! read -t "$timeout" -r reply; then
+    printf '\n'
+    [[ -n "$suggestion" ]] && info "나중에 실행: ${suggestion}"
+    login_remember_skip
+    return 0
+  fi
+  case "${reply,,}" in
+    ""|y|yes)
+      printf '\n'
+      cmd_login_apply || true
+      ;;
+    *)
+      [[ -n "$suggestion" ]] && info "나중에 실행: ${suggestion}"
+      login_remember_skip
+      ;;
+  esac
+  return 0
+}
+
+login_profile_path() {
+  if [[ -n "${WEBTOP_LOGIN_PROFILE:-}" ]]; then
+    printf '%s' "$WEBTOP_LOGIN_PROFILE"
+    return 0
+  fi
+  printf '/etc/profile.d/webtop-update.sh'
+}
+
+login_bashrc_path() {
+  if [[ -n "${WEBTOP_LOGIN_BASHRC:-}" ]]; then
+    printf '%s' "$WEBTOP_LOGIN_BASHRC"
+    return 0
+  fi
+  printf '%s/.bashrc' "${HOME:-/tmp}"
+}
+
+login_hook_script() {
+  cat <<EOF
+# webtop-login-check
+# Sourced from a login shell. Never fail the login.
+if [ -n "\${WEBTOP_LOGIN_SHOWN:-}" ]; then
+  return 0 2>/dev/null || exit 0
+fi
+case \$- in
+  *i*) ;;
+  *) return 0 2>/dev/null || exit 0 ;;
+esac
+if [ ! -t 0 ] || [ ! -t 1 ]; then
+  return 0 2>/dev/null || exit 0
+fi
+export WEBTOP_LOGIN_SHOWN=1
+${SCRIPT_PATH} motd || true
+EOF
+}
+
+login_write_profile() {
+  local file
+  file=$(login_profile_path)
+  if [[ -e "$file" ]] && ! grep -q 'webtop-login-check' "$file"; then
+    warn "로그인 알림을 넣지 않았습니다. 다른 파일입니다: ${file}"
+    return 1
+  fi
+  mkdir -p "$(dirname "$file")" || return 1
+  login_hook_script >"$file"
+  chmod 644 "$file" 2>/dev/null || true
+  ok "로그인 알림을 설치했습니다: ${file}"
+}
+
+login_bashrc_has_hook() {
+  local file
+  file=$(login_bashrc_path)
+  [[ -f "$file" ]] && grep -q 'webtop-login-check start' "$file"
+}
+
+login_write_bashrc() {
+  local file tmp
+  file=$(login_bashrc_path)
+  mkdir -p "$(dirname "$file")" || return 1
+  tmp=$(mktemp)
+  if [[ -f "$file" ]]; then
+    awk '
+      $0 == "# webtop-login-check start" { skip = 1; next }
+      $0 == "# webtop-login-check end" { skip = 0; next }
+      skip != 1 { print }
+    ' "$file" >"$tmp"
+  fi
+  {
+    cat "$tmp"
+    printf '%s\n' "# webtop-login-check start"
+    login_hook_script
+    printf '%s\n' "# webtop-login-check end"
+  } >"${tmp}.out"
+  mv -f "${tmp}.out" "$file"
+  rm -f "$tmp"
+  ok "로그인 알림을 넣었습니다: ${file}"
+}
+
+login_strip_bashrc() {
+  local file tmp
+  file=$(login_bashrc_path)
+  [[ -f "$file" ]] || return 0
+  grep -q 'webtop-login-check' "$file" || return 0
+  tmp=$(mktemp)
+  awk '
+    $0 == "# webtop-login-check start" { skip = 1; next }
+    $0 == "# webtop-login-check end" { skip = 0; next }
+    skip != 1 { print }
+  ' "$file" >"$tmp"
+  mv -f "$tmp" "$file"
+  ok "로그인 알림을 뺐습니다: ${file}"
+}
+
+cmd_login_install() {
+  local wrote=0 hours
+  hours=$(env_get LOGIN_CHECK_INTERVAL)
+  hours=${hours:-6}
+  if [[ -n "${WEBTOP_LOGIN_PROFILE:-}" || "$(id -u)" -eq 0 ]]; then
+    if login_write_profile; then
+      wrote=1
+    fi
+  fi
+  if [[ "$(id -u)" -ne 0 || -n "${WEBTOP_LOGIN_BASHRC:-}" ]]; then
+    if [[ "$(id -u)" -ne 0 ]]; then
+      login_write_bashrc || return 1
+      wrote=1
+    elif [[ -n "${WEBTOP_LOGIN_BASHRC:-}" ]]; then
+      login_write_bashrc || return 1
+      wrote=1
+    fi
+  fi
+  if [[ "$wrote" -eq 0 ]]; then
+    err "로그인 알림을 설치하지 못했습니다."
+    return 1
+  fi
+  info "LOGIN_CHECK=$(login_check_mode). 확인 간격은 ${hours}시간입니다. 끄려면 LOGIN_CHECK=off"
+}
+
+cmd_login_uninstall() {
+  local file removed=0
+  file=$(login_profile_path)
+  if [[ -f "$file" ]] && grep -q 'webtop-login-check' "$file"; then
+    rm -f "$file"
+    ok "로그인 알림을 지웠습니다: ${file}"
+    removed=1
+  fi
+  if login_bashrc_has_hook || { [[ -f "$(login_bashrc_path)" ]] && grep -q 'webtop-login-check' "$(login_bashrc_path)"; }; then
+    login_strip_bashrc
+    removed=1
+  fi
+  if [[ "$removed" -eq 0 ]]; then
+    info "설치된 로그인 알림이 없습니다."
+  fi
+}
+
+cmd_login_status() {
+  local file checked now age
+  info "LOGIN_CHECK=$(login_check_mode)"
+  info "LOGIN_CHECK_INTERVAL=$(env_get LOGIN_CHECK_INTERVAL)시간 (비우면 6)"
+  file=$(login_profile_path)
+  if [[ -f "$file" ]] && grep -q 'webtop-login-check' "$file"; then
+    ok "프로필: ${file}"
+  else
+    info "프로필: 없음 (${file})"
+  fi
+  file=$(login_bashrc_path)
+  if [[ -f "$file" ]] && grep -q 'webtop-login-check' "$file"; then
+    ok "bashrc: ${file}"
+  else
+    info "bashrc: 없음 (${file})"
+  fi
+  file=$(login_cache_file)
+  if [[ -f "$file" ]]; then
+    checked=$(login_cache_get checked_at)
+    now=$(date +%s)
+    if [[ "$checked" =~ ^[0-9]+$ ]]; then
+      age=$((now - checked))
+      info "캐시: ${file}  ${age}초 전  repo=$(login_cache_get repo) image=$(login_cache_get image)"
+    else
+      info "캐시: ${file}"
+    fi
+  else
+    info "캐시: 아직 없습니다. 다음 로그인에서 백그라운드로 확인합니다."
+  fi
+}
+
+cmd_login_check() {
+  case "${OPT_NAME:-}" in
+    install) cmd_login_install ;;
+    uninstall|remove) cmd_login_uninstall ;;
+    status) cmd_login_status ;;
+    refresh) cmd_login_refresh ;;
+    "") cmd_login_show ;;
+    *)
+      err "login-check 는 install, uninstall, status, refresh 입니다."
+      return 1
+      ;;
+  esac
 }
 
 cmd_check_update() {
@@ -2608,6 +3158,8 @@ main() {
     filebrowser) cmd_filebrowser ;;
     link) cmd_link ;;
     self-update|upgrade) cmd_self_update self ;;
+    motd) cmd_login_show ;;
+    login-check) cmd_login_check ;;
     __after-pull) cmd_after_pull ;;
     *)
       err "알 수 없는 명령: ${cmd}"
