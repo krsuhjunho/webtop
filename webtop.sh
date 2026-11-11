@@ -4,7 +4,45 @@
 
 set -u
 
-ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# Follow symlinks so `webtop` in /usr/local/bin still uses this repo.
+script_realpath() {
+  local src=$1 dir target resolved
+  if [[ "$src" != */* ]]; then
+    resolved=$(command -v "$src" 2>/dev/null || true)
+    if [[ -n "$resolved" ]]; then
+      src=$resolved
+    fi
+  fi
+  if command -v readlink >/dev/null 2>&1; then
+    resolved=$(readlink -f "$src" 2>/dev/null || true)
+    if [[ -n "$resolved" && -e "$resolved" ]]; then
+      printf '%s\n' "$resolved"
+      return 0
+    fi
+  fi
+  if command -v realpath >/dev/null 2>&1; then
+    resolved=$(realpath "$src" 2>/dev/null || true)
+    if [[ -n "$resolved" && -e "$resolved" ]]; then
+      printf '%s\n' "$resolved"
+      return 0
+    fi
+  fi
+  while [[ -L "$src" ]]; do
+    target=$(readlink "$src" 2>/dev/null || true)
+    [[ -n "$target" ]] || break
+    if [[ "$target" != /* ]]; then
+      dir=$(cd "$(dirname "$src")" && pwd) || return 1
+      src="${dir}/${target}"
+    else
+      src=$target
+    fi
+  done
+  dir=$(cd "$(dirname "$src")" && pwd) || return 1
+  printf '%s/%s\n' "$dir" "$(basename "$src")"
+}
+
+SCRIPT_PATH=$(script_realpath "${BASH_SOURCE[0]}") || exit 1
+ROOT=$(cd "$(dirname "$SCRIPT_PATH")" && pwd) || exit 1
 ENV_EXAMPLE="$ROOT/deploy/.env.example"
 ENV_FILE="$ROOT/deploy/.env"
 COMPOSE_FILE="$ROOT/deploy/docker-compose.yml"
@@ -148,6 +186,7 @@ usage() {
   cron-install          주간 cron 등록
   cron-remove           주간 cron 제거
   cron-status           주간 cron 상태
+  link [이름]           /usr/local/bin 에 이 스크립트 링크. 기본 이름은 webtop
   install               전체 자동 설치
 
 옵션:
@@ -1515,6 +1554,49 @@ cmd_variant() {
   fi
 }
 
+write_bash_completion() {
+  local name=$1 dir=/etc/bash_completion.d file
+  file="${dir}/webtop"
+  if [[ ! -d "$dir" ]] && ! mkdir -p "$dir"; then
+    warn "bash 완료 디렉터리를 만들지 못했습니다: ${dir}"
+    return 0
+  fi
+  cat >"$file" <<EOF
+# Installed by webtop link. Completes the ${name} command.
+_webtop_complete() {
+  local cur
+  cur="\${COMP_WORDS[COMP_CWORD]}"
+  if [[ \${COMP_CWORD} -eq 1 ]]; then
+    COMPREPLY=( \$(compgen -W "precheck env ca server client enroll list revoke start stop restart status logs access access-log geo-status geo-test profile variant filebrowser update check-update auto-update cron-install cron-remove cron-status install link" -- "\$cur") )
+  fi
+}
+complete -F _webtop_complete ${name}
+EOF
+  ok "bash 완료를 설치했습니다: ${file}"
+  info "현재 셸에 적용하려면 source ${file}"
+}
+
+cmd_link() {
+  local name=${OPT_NAME:-webtop} dest
+  if ! valid_name "$name"; then
+    err "링크 이름은 영문, 숫자, ., _, - 만 사용할 수 있습니다."
+    return 1
+  fi
+  dest="/usr/local/bin/${name}"
+  if [[ "$(id -u)" -ne 0 ]]; then
+    err "이 링크는 root 가 필요합니다."
+    err "예: sudo ${SCRIPT_PATH} link ${name}"
+    return 1
+  fi
+  if [[ ! -d /usr/local/bin ]]; then
+    err "디렉터리가 없습니다: /usr/local/bin"
+    return 1
+  fi
+  ln -sfn "$SCRIPT_PATH" "$dest"
+  ok "링크를 만들었습니다: ${dest} -> ${SCRIPT_PATH}"
+  write_bash_completion "$name"
+}
+
 cmd_filebrowser() {
   local action=${OPT_NAME:-} line
   require_env_file || return 1
@@ -1983,7 +2065,7 @@ cron_command_line() {
   local schedule=$1 flock_bin
   flock_bin=$(command -v flock)
   printf '%s %s -n %s env WEBTOP_FLOCKED=1 %s auto-update >> %s 2>&1\n' \
-    "$schedule" "$flock_bin" "$UPDATE_LOCK" "$ROOT/webtop.sh" "$UPDATE_LOG"
+    "$schedule" "$flock_bin" "$UPDATE_LOCK" "$SCRIPT_PATH" "$UPDATE_LOG"
 }
 
 cmd_cron_menu() {
@@ -2315,6 +2397,7 @@ main() {
     profile) cmd_profile ;;
     variant) cmd_variant ;;
     filebrowser) cmd_filebrowser ;;
+    link) cmd_link ;;
     *)
       err "알 수 없는 명령: ${cmd}"
       usage
