@@ -26,6 +26,23 @@ services:
       LANGUAGE: ${LANGUAGE:-ko_KR:ko:ja_JP:ja:en}
       LC_ALL: ${LC_ALL:-ko_KR.UTF-8}
       TITLE: ${TITLE:-Webtop}
+      # low-power is the default for a 2 vCPU host. profile in webtop.sh rewrites these.
+      # jpeg is damage-tracked and cheaper than full-frame H.264. h264enc is the
+      # software x264 encoder (striped, one stripe per core when threading is on).
+      # Current Selkies has no separate x264 preset/tune knob.
+      WEBTOP_PROFILE: ${WEBTOP_PROFILE:-low-power}
+      WEBTOP_BRAVE_LOW_CPU: ${WEBTOP_BRAVE_LOW_CPU:-1}
+      SELKIES_ENCODER: ${SELKIES_ENCODER:-jpeg}
+      SELKIES_FRAMERATE: ${SELKIES_FRAMERATE:-30}
+      SELKIES_JPEG_QUALITY: ${SELKIES_JPEG_QUALITY:-55}
+      SELKIES_VIDEO_CRF: ${SELKIES_VIDEO_CRF:-32}
+      SELKIES_USE_CPU: ${SELKIES_USE_CPU:-true}
+      SELKIES_CPU_ENCODE_THREADING: ${SELKIES_CPU_ENCODE_THREADING:-true}
+      SELKIES_VIDEO_STREAMING_MODE: ${SELKIES_VIDEO_STREAMING_MODE:-false}
+      SELKIES_USE_CSS_SCALING: ${SELKIES_USE_CSS_SCALING:-true}
+      SELKIES_SCALING_DPI: ${SELKIES_SCALING_DPI:-96}
+      # Set false to skip Opus capture. PipeWire then stays down inside the session.
+      SELKIES_AUDIO_ENABLED: ${SELKIES_AUDIO_ENABLED:-true}
     volumes:
       - webtop-config:/config
       # Host Docker socket, optional. The image ships the CLI and compose plugin only.
