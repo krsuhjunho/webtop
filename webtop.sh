@@ -16,7 +16,8 @@ CERTADMIN_LOG="${WEBTOP_CERTADMIN_LOG:-$ROOT/deploy/logs/certadmin.log}"
 LOG_TAIL=100
 UPDATE_LOG="${WEBTOP_UPDATE_LOG:-$ROOT/deploy/logs/update.log}"
 UPDATE_LOCK="$ROOT/deploy/logs/update.lock"
-IMAGE_REF="ghcr.io/krsuhjunho/webtop:latest"
+IMAGE_NAME="ghcr.io/krsuhjunho/webtop"
+IMAGE_REF="${IMAGE_NAME}:latest"
 CRONTAB=${CRONTAB:-crontab}
 
 NONINTERACTIVE=0
@@ -43,6 +44,7 @@ OPT_SCHEDULE=""
 OPT_MODE=""
 OPT_CONSTRAINTS=()
 OPT_PROFILE=""
+OPT_VARIANT=""
 
 if [[ -t 1 ]]; then
   C_RED=$'\033[1;31m'
@@ -135,8 +137,9 @@ usage() {
   access-log [종류]     access|certadmin|update. 메뉴에서는 따라가기
   geo-status            GeoIP DB, 허용 국가, Nginx 네트워크 모드
   geo-test <ip>         그 IP 를 Nginx 의 mmdb 로 조회하고 허용/거부를 출력
-  profile <이름>        low-power, balanced, quality. .env 를 고치고 webtop 을 다시 만듭니다
-  update                새 버전이 있을 때만 이미지 업데이트
+  profile <이름>        low-power, balanced, quality. Selkies 전용
+  variant [selkies|kasm] 데스크톱 변형. selkies 는 :latest, kasm 은 :kasm
+  update                선택한 태그에 새 버전이 있을 때만 이미지 업데이트
   check-update          업데이트 확인만
   auto-update           cron 용. UPDATE_MODE 에 따라 확인 또는 적용
   cron-install          주간 cron 등록
@@ -158,6 +161,7 @@ usage() {
   --service webtop|nginx|geoipupdate|certadmin|all
   geo-test 의 IP 는 명령 뒤에 그대로 적습니다
   --profile low-power|balanced|quality
+  --variant selkies|kasm  기본은 selkies (:latest). kasm 은 XFCE (:kasm)
   --yes                 업데이트 확인 질문을 생략
   --prune               적용 후 이전 dangling 이미지 삭제
   --schedule '0 6 * * 1'
@@ -190,6 +194,7 @@ stack_nginx_running() {
 compose() {
   local -a args
   local http
+  ensure_variant_env || return 1
   args=(--env-file "$ENV_FILE" -f "$COMPOSE_FILE")
   http=$(env_get HTTP_PORT)
   if [[ -n "$http" ]]; then
@@ -326,6 +331,67 @@ valid_cn() {
   [[ "$1" =~ ^[A-Za-z0-9.-]+$ ]]
 }
 
+# selkies is the KDE image on :latest. kasm is the XFCE image on :kasm.
+normalize_variant() {
+  local raw=${1,,}
+  case "$raw" in
+    ""|selkies|kde) printf 'selkies' ;;
+    kasm|kasmvnc|xfce) printf 'kasm' ;;
+    *) return 1 ;;
+  esac
+}
+
+variant_moving_tag() {
+  case "$1" in
+    kasm) printf 'kasm' ;;
+    *) printf 'latest' ;;
+  esac
+}
+
+# Empty or a moving tag follows the variant. A pinned tag is left alone.
+ensure_variant_env() {
+  [[ -f "$ENV_FILE" ]] || return 0
+  local variant raw tag current
+  raw=$(env_get WEBTOP_VARIANT)
+  if ! variant=$(normalize_variant "${raw:-selkies}"); then
+    err "WEBTOP_VARIANT 는 selkies 또는 kasm 이어야 합니다: ${raw}"
+    return 1
+  fi
+  if [[ "$raw" != "$variant" ]]; then
+    env_set WEBTOP_VARIANT "$variant" || return 1
+  fi
+  tag=$(variant_moving_tag "$variant")
+  current=$(env_get IMAGE_TAG)
+  case "$current" in
+    ""|latest|kasm)
+      if [[ "$current" != "$tag" ]]; then
+        env_set IMAGE_TAG "$tag" || return 1
+      fi
+      ;;
+  esac
+}
+
+image_tag_for_update() {
+  local tag variant
+  tag=$(env_get IMAGE_TAG)
+  if [[ -n "$tag" ]]; then
+    printf '%s' "$tag"
+    return 0
+  fi
+  if ! variant=$(normalize_variant "$(env_get WEBTOP_VARIANT)"); then
+    variant=selkies
+  fi
+  variant=${variant:-selkies}
+  variant_moving_tag "$variant"
+}
+
+date_prefix_for_tag() {
+  case "$1" in
+    kasm|kasm-*) printf 'kasm' ;;
+    *) printf '' ;;
+  esac
+}
+
 build_san() {
   local cn=$1 extra=$2 san item
   san="DNS:${cn},DNS:localhost,IP:127.0.0.1"
@@ -413,6 +479,7 @@ cmd_precheck() {
     else
       warn "deploy/.env: MaxMind 값이 비어 있음"
     fi
+    info "변형: $(env_get WEBTOP_VARIANT)  이미지 태그: $(env_get IMAGE_TAG)"
   else
     warn "deploy/.env: 없음"
   fi
@@ -554,6 +621,31 @@ cmd_env() {
     return 1
   fi
 
+  local variant prev_variant moving current_tag
+  prev_variant=$(env_get WEBTOP_VARIANT)
+  if [[ "$NONINTERACTIVE" -eq 1 ]]; then
+    if [[ -n "$OPT_VARIANT" ]]; then
+      if ! variant=$(normalize_variant "$OPT_VARIANT"); then
+        err "변형은 selkies 또는 kasm 이어야 합니다."
+        return 1
+      fi
+    else
+      if ! variant=$(normalize_variant "${prev_variant:-selkies}"); then
+        err "WEBTOP_VARIANT 값이 올바르지 않습니다: ${prev_variant}"
+        return 1
+      fi
+    fi
+  else
+    local variant_default
+    variant_default=$(normalize_variant "${prev_variant:-selkies}" || true)
+    variant_default=${variant_default:-selkies}
+    variant=$(prompt "데스크톱 변형 (selkies=KDE, kasm=XFCE)" "$variant_default")
+    if ! variant=$(normalize_variant "$variant"); then
+      err "변형은 selkies 또는 kasm 이어야 합니다."
+      return 1
+    fi
+  fi
+
   env_set MAXMIND_ACCOUNT_ID "$account" || return 1
   env_set MAXMIND_LICENSE_KEY "$license" || return 1
   env_set ALLOWED_COUNTRIES "$countries" || return 1
@@ -562,10 +654,17 @@ cmd_env() {
   env_set TZ "$tz" || return 1
   env_set HTTPS_PORT "$https" || return 1
   env_set HTTP_PORT "$http" || return 1
+  env_set WEBTOP_VARIANT "$variant" || return 1
+  moving=$(variant_moving_tag "$variant")
+  current_tag=$(env_get IMAGE_TAG)
+  if [[ -z "$current_tag" || "$current_tag" == "latest" || "$current_tag" == "kasm" || "${prev_variant:-selkies}" != "$variant" ]]; then
+    env_set IMAGE_TAG "$moving" || return 1
+  fi
   ensure_proxy_secret || return 1
   ok "deploy/.env 를 저장했습니다. 라이선스 키는 출력하지 않습니다."
   info "  계정 ID=${account}  국가=${countries}  PUID=${puid}  PGID=${pgid}  TZ=${tz}"
   info "  HTTPS=${https}  HTTP=${http:-끔}"
+  info "  변형=${variant}  이미지 태그=$(env_get IMAGE_TAG)"
   if [[ -n "$(env_get MAXMIND_LICENSE_KEY)" ]]; then
     info "  라이선스 키=설정됨"
   fi
@@ -1196,9 +1295,52 @@ apply_profile_env() {
   fi
 }
 
+cmd_variant() {
+  local name=${OPT_VARIANT:-${OPT_NAME:-}} variant tag
+  require_env_file || return 1
+  if [[ -z "$name" ]]; then
+    info "현재 변형: $(env_get WEBTOP_VARIANT)  이미지 태그: $(env_get IMAGE_TAG)"
+    if [[ "$NONINTERACTIVE" -eq 1 ]]; then
+      return 0
+    fi
+    name=$(prompt "변형 (selkies/kasm)" "$(env_get WEBTOP_VARIANT)")
+  fi
+  if ! variant=$(normalize_variant "$name"); then
+    err "변형은 selkies 또는 kasm 이어야 합니다."
+    return 1
+  fi
+  tag=$(variant_moving_tag "$variant")
+  env_set WEBTOP_VARIANT "$variant" || return 1
+  env_set IMAGE_TAG "$tag" || return 1
+  ok "변형을 ${variant} 로 저장했습니다. 이미지 태그=${tag}"
+  if [[ "$variant" == "kasm" ]]; then
+    info "KasmVNC + XFCE 입니다. /config 는 Selkies 와 같이 씁니다."
+    info "성능 프로파일은 적용되지 않습니다. 첫 클릭이나 키 입력 때 브라우저 소리가 켜집니다."
+  else
+    info "Selkies + KDE 입니다. 이미지 태그는 latest 입니다."
+  fi
+  if ! have docker; then
+    warn "docker 가 없어 컨테이너는 다시 만들지 않았습니다."
+    return 0
+  fi
+  if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx webtop; then
+    info "webtop 컨테이너를 새 이미지로 다시 만듭니다."
+    compose pull webtop
+    compose up -d --no-deps --force-recreate webtop
+  else
+    info "webtop 이 꺼져 있습니다. 다음에 시작할 때 적용됩니다."
+  fi
+}
+
 cmd_profile() {
   local profile=${OPT_PROFILE:-${OPT_NAME:-}}
   require_env_file || return 1
+  ensure_variant_env || return 1
+  if [[ "$(env_get WEBTOP_VARIANT)" == "kasm" ]]; then
+    warn "성능 프로파일은 Selkies 전용입니다. 현재 변형은 KasmVNC XFCE 라 인코더와 프레임을 바꾸지 않습니다."
+    info "Brave GPU 래스터는 WEBTOP_BRAVE_LOW_CPU 로 조절합니다. 현재 값: $(env_get WEBTOP_BRAVE_LOW_CPU)"
+    return 0
+  fi
   if [[ -z "$profile" ]]; then
     if [[ "$NONINTERACTIVE" -eq 1 ]]; then
       err "프로파일이 필요합니다. 예: ./webtop.sh profile low-power"
@@ -1381,13 +1523,17 @@ ghcr_digest_header() {
 }
 
 remote_release() {
-  local token arch index_json arch_digest manifest
+  local token arch index_json arch_digest manifest tag prefix
   token=$(ghcr_token) || return 1
   [[ -n "$token" ]] || return 1
   arch=$(host_arch)
   [[ -n "$arch" ]] || { err "지원하지 않는 아키텍처입니다: $(uname -m)"; return 1; }
-  index_json=$(ghcr_manifest "$token" latest "application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json") || return 1
-  REMOTE_INDEX=$(ghcr_digest_header "$token" latest)
+  tag=$(image_tag_for_update)
+  [[ -n "$tag" ]] || return 1
+  REMOTE_TAG=$tag
+  IMAGE_REF="${IMAGE_NAME}:${tag}"
+  index_json=$(ghcr_manifest "$token" "$tag" "application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json") || return 1
+  REMOTE_INDEX=$(ghcr_digest_header "$token" "$tag")
   arch_digest=$(printf '%s' "$index_json" | awk -v want="$arch" '
     match($0, /sha256:[0-9a-f]+/) { last = substr($0, RSTART, RLENGTH) }
     /"architecture"/ {
@@ -1407,18 +1553,27 @@ remote_release() {
     in_config && match($0, /sha256:[0-9a-f]+/) { print substr($0, RSTART, RLENGTH); exit }
   ')
   [[ -n "$REMOTE_CONFIG" ]] || return 1
-  REMOTE_DATE=$(date_tag_for_index "$token" "$REMOTE_INDEX")
+  prefix=$(date_prefix_for_tag "$tag")
+  REMOTE_DATE=$(date_tag_for_index "$token" "$REMOTE_INDEX" "$prefix")
 }
 
 date_tag_for_index() {
-  local token=$1 want=$2 tags tag digest
+  local token=$1 want=$2 prefix=${3:-} tags tag digest pattern
+  local -a patterns=()
   tags=$(curl -fsSL -H "Authorization: Bearer ${token}" "https://ghcr.io/v2/krsuhjunho/webtop/tags/list") || return 0
-  for tag in $(printf '%s' "$tags" | grep -oE '"[0-9]{6}"' | tr -d '"'); do
-    digest=$(ghcr_digest_header "$token" "$tag") || continue
-    if [[ "$digest" == "$want" ]]; then
-      printf '%s' "$tag"
-      return 0
-    fi
+  if [[ "$prefix" == "kasm" ]]; then
+    patterns=('kasm-[0-9]{6}')
+  else
+    patterns=('[0-9]{6}' 'kasm-[0-9]{6}')
+  fi
+  for pattern in "${patterns[@]}"; do
+    for tag in $(printf '%s' "$tags" | grep -oE "\"${pattern}\"" | tr -d '"'); do
+      digest=$(ghcr_digest_header "$token" "$tag") || continue
+      if [[ "$digest" == "$want" ]]; then
+        printf '%s' "$tag"
+        return 0
+      fi
+    done
   done
 }
 
@@ -1486,14 +1641,14 @@ report_versions() {
   else
     info "로컬 이미지: 없음"
   fi
-  info "원격 latest ($(host_arch)): ${remote_id}"
+  info "원격 ${REMOTE_TAG:-latest} ($(host_arch)): ${remote_id}"
   info "원격 매니페스트: ${REMOTE_ARCH}  날짜 태그: ${REMOTE_DATE:-없음}"
 }
 
 cmd_check_update() {
   have docker || { err "docker 가 없습니다."; return 1; }
   info "원격 이미지를 확인합니다."
-  remote_release || { err "GHCR 에서 latest 를 읽지 못했습니다."; return 1; }
+  remote_release || { err "GHCR 에서 $(image_tag_for_update) 를 읽지 못했습니다."; return 1; }
   collect_local_image
   report_versions
   if images_current; then
@@ -1753,6 +1908,7 @@ draw_menu() {
 20) GeoIP 상태
 21) GeoIP IP 시험
 22) 성능 프로파일
+23) 데스크톱 변형
  0) 종료
 EOF
 }
@@ -1782,6 +1938,7 @@ menu_once() {
     20) cmd_geo_status || true ;;
     21) OPT_NAME=""; cmd_geo_test || true ;;
     22) cmd_profile || true ;;
+    23) OPT_VARIANT=""; OPT_NAME=""; cmd_variant || true ;;
     0|q|Q|exit) return 10 ;;
     "") ;;
     *) err "없는 번호입니다: ${choice}" ;;
@@ -1835,6 +1992,7 @@ parse_opts() {
       --p12-pass) OPT_P12=$2; shift 2 ;;
       --service) OPT_SERVICE=$2; shift 2 ;;
       --profile) OPT_PROFILE=$2; shift 2 ;;
+      --variant) OPT_VARIANT=$2; shift 2 ;;
       -h|--help) usage; exit 0 ;;
       --) shift; break ;;
       -*)
@@ -1900,6 +2058,7 @@ main() {
     cron-status) cmd_cron_status ;;
     install) cmd_install ;;
     profile) cmd_profile ;;
+    variant) cmd_variant ;;
     *)
       err "알 수 없는 명령: ${cmd}"
       usage
