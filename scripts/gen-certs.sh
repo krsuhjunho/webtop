@@ -16,7 +16,11 @@ usage() {
 Usage: scripts/gen-certs.sh <command> [options]
 
 Commands:
-  init                         Create the CA and an empty CRL (idempotent)
+  init [--name-constraint NAME]
+                               Create the CA and an empty CRL (idempotent)
+                               Repeat --name-constraint for each permitted DNS
+                               name or IP. A new CA then carries critical
+                               nameConstraints. An existing CA is left as-is.
   server [--cn NAME] [--san LIST]
                                Issue the Nginx server certificate
   client <name> [--admin] [--days N]
@@ -32,6 +36,9 @@ Options:
   --p12-pass PASS              PKCS#12 password (default changeit, or $P12_PASS)
   --admin                      Mark the client certificate OU=admin
   --days N                     Certificate lifetime in days (default 825)
+  --name-constraint NAME       Permitted DNS name or IP for a new CA.
+                               Repeat the flag. DNS permits that name and its
+                               subdomains. IP may be a single address or CIDR.
 
 After revoke or crl, reload Nginx so it re-reads the CRL:
   docker compose -f deploy/docker-compose.yml exec nginx nginx -s reload
@@ -49,6 +56,10 @@ need_openssl() {
 }
 
 write_cnf() {
+  nc_line=""
+  if [ -n "${1:-}" ]; then
+    nc_line="nameConstraints = critical,${1}"
+  fi
   cat > "$CERT_DIR/openssl.cnf" <<EOF
 [ ca ]
 default_ca = CA_default
@@ -91,6 +102,7 @@ subjectKeyIdentifier = hash
 authorityKeyIdentifier = keyid:always,issuer
 basicConstraints = critical, CA:true
 keyUsage = critical, digitalSignature, cRLSign, keyCertSign
+${nc_line}
 EOF
 }
 
@@ -111,20 +123,171 @@ pem_only() {
   rm -f "$tmp"
 }
 
-cmd_init() {
-  ensure_layout
-  if [ -f "$CERT_DIR/ca/ca.key" ] && [ -f "$CERT_DIR/ca/ca.crt" ]; then
-    echo "CA already exists: $CERT_DIR/ca/ca.crt"
+ipv4_ok() {
+  printf '%s' "$1" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || return 1
+  oldifs=$IFS
+  IFS=.
+  # shellcheck disable=SC2086
+  set -- $1
+  IFS=$oldifs
+  [ "$#" -eq 4 ] || return 1
+  for octet in "$@"; do
+    [ "$octet" -ge 0 ] && [ "$octet" -le 255 ] || return 1
+  done
+}
+
+ipv4_mask() {
+  prefix=$1
+  bits=$prefix
+  out=""
+  i=0
+  while [ "$i" -lt 4 ]; do
+    if [ "$bits" -ge 8 ]; then
+      octet=255
+      bits=$((bits - 8))
+    elif [ "$bits" -gt 0 ]; then
+      octet=$(( (255 << (8 - bits)) & 255 ))
+      bits=0
+    else
+      octet=0
+    fi
+    if [ -n "$out" ]; then
+      out="${out}.${octet}"
+    else
+      out=$octet
+    fi
+    i=$((i + 1))
+  done
+  printf '%s' "$out"
+}
+
+ipv6_mask() {
+  prefix=$1
+  bits=$prefix
+  out=""
+  i=0
+  while [ "$i" -lt 8 ]; do
+    if [ "$bits" -ge 16 ]; then
+      group=ffff
+      bits=$((bits - 16))
+    elif [ "$bits" -gt 0 ]; then
+      group=$(printf '%x' $(( (65535 << (16 - bits)) & 65535 )))
+      bits=0
+    else
+      group=0
+    fi
+    if [ -n "$out" ]; then
+      out="${out}:${group}"
+    else
+      out=$group
+    fi
+    i=$((i + 1))
+  done
+  printf '%s' "$out"
+}
+
+dns_constraint() {
+  name=$1
+  name=${name#DNS:}
+  name=${name#dns:}
+  name=${name%.}
+  name=${name#\*.}
+  printf '%s' "$name" | grep -Eq '^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$' || return 1
+  [ "${#name}" -le 253 ] || return 1
+  printf 'permitted;DNS:%s' "$name"
+}
+
+ip_constraint() {
+  raw=$1
+  raw=${raw#IP:}
+  raw=${raw#ip:}
+  host=${raw%%/*}
+  prefix=""
+  case $raw in
+    */*) prefix=${raw#*/} ;;
+  esac
+  if printf '%s' "$host" | grep -q ':'; then
+    printf '%s' "$host" | grep -Eq '^[0-9A-Fa-f:.]+$' || return 1
+    if [ -z "$prefix" ]; then
+      prefix=128
+    fi
+    printf '%s' "$prefix" | grep -Eq '^(0|[1-9][0-9]?|1[0-1][0-9]|12[0-8])$' || return 1
+    printf 'permitted;IP:%s/%s' "$host" "$(ipv6_mask "$prefix")"
+    return 0
+  fi
+  ipv4_ok "$host" || return 1
+  if [ -z "$prefix" ]; then
+    prefix=32
+  fi
+  printf '%s' "$prefix" | grep -Eq '^([0-9]|[12][0-9]|3[0-2])$' || return 1
+  printf 'permitted;IP:%s/%s' "$host" "$(ipv4_mask "$prefix")"
+}
+
+append_constraint() {
+  piece=$1
+  if [ -z "$NAME_CONSTRAINTS" ]; then
+    NAME_CONSTRAINTS=$piece
   else
-    openssl req -x509 -new -nodes \
-      -newkey rsa:2048 \
-      -keyout "$CERT_DIR/ca/ca.key" \
-      -out "$CERT_DIR/ca/ca.crt" \
-      -days "$DAYS_CA" \
-      -config "$CERT_DIR/openssl.cnf" \
-      -extensions v3_ca \
-      -subj "/CN=Webtop CA/O=Webtop"
-    chmod 600 "$CERT_DIR/ca/ca.key"
+    NAME_CONSTRAINTS="${NAME_CONSTRAINTS},${piece}"
+  fi
+}
+
+cmd_init() {
+  NAME_CONSTRAINTS=""
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --name-constraint)
+        [ $# -ge 2 ] || { echo "missing value for --name-constraint" >&2; exit 1; }
+        value=$2
+        shift 2
+        piece=""
+        case $value in
+          [Dd][Nn][Ss]:*)
+            piece=$(dns_constraint "$value") || { echo "invalid DNS constraint: $value" >&2; exit 1; }
+            ;;
+          *)
+            if printf '%s' "$value" | grep -Eq '^[Ii][Pp]:' \
+              || printf '%s' "$value" | grep -q ':' \
+              || printf '%s' "${value%%/*}" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; then
+              piece=$(ip_constraint "$value") || { echo "invalid IP constraint: $value" >&2; exit 1; }
+            else
+              piece=$(dns_constraint "$value") || { echo "invalid DNS constraint: $value" >&2; exit 1; }
+            fi
+            ;;
+        esac
+        append_constraint "$piece"
+        ;;
+      *) echo "unknown option: $1" >&2; usage; exit 1 ;;
+    esac
+  done
+  if [ -f "$CERT_DIR/ca/ca.key" ] && [ -f "$CERT_DIR/ca/ca.crt" ]; then
+    if [ -n "$NAME_CONSTRAINTS" ]; then
+      echo "CA already exists: $CERT_DIR/ca/ca.crt" >&2
+      echo "Name constraints are fixed inside that CA certificate." >&2
+      echo "Replacing the CA means reissuing the server certificate and every client certificate, then installing the new root on each device." >&2
+      exit 1
+    fi
+    ensure_layout
+    echo "CA already exists: $CERT_DIR/ca/ca.crt"
+    cmd_crl
+    return 0
+  fi
+  ensure_layout
+  if [ -n "$NAME_CONSTRAINTS" ]; then
+    write_cnf "$NAME_CONSTRAINTS"
+  fi
+  openssl req -x509 -new -nodes \
+    -newkey rsa:2048 \
+    -keyout "$CERT_DIR/ca/ca.key" \
+    -out "$CERT_DIR/ca/ca.crt" \
+    -days "$DAYS_CA" \
+    -config "$CERT_DIR/openssl.cnf" \
+    -extensions v3_ca \
+    -subj "/CN=Webtop CA/O=Webtop"
+  chmod 600 "$CERT_DIR/ca/ca.key"
+  if [ -n "$NAME_CONSTRAINTS" ]; then
+    echo "Created CA with name constraints: $CERT_DIR/ca/ca.crt"
+  else
     echo "Created CA: $CERT_DIR/ca/ca.crt"
   fi
   cmd_crl

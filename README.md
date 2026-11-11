@@ -146,7 +146,7 @@ Selkies 는 캡처용 컴포지터와 KWin 이 중첩이라, 자판에 없는 �
 
 `https://호스트/admin/` 은 클라이언트 인증서에 `OU=admin` 이 있거나 CN 이 `ADMIN_CNS` 에 있을 때만 열립니다. 메뉴의 관리자 인증서 발급 또는 `./webtop.sh client 이름 --admin` 으로 만듭니다. 그 페이지에서 인증서 목록, 발급, 폐기, 일회용 등록 링크를 처리합니다. 폐기하면 CRL 을 다시 쓰고 Nginx 가 잠시 후 다시 읽어 폐기된 인증서를 거부합니다. CA 개인키는 certadmin 컨테이너만 마운트합니다.
 
-`/enroll/<토큰>` 은 클라이언트 인증서 없이 열리지만, 국가 제한은 그대로입니다. 토큰은 256비트 난수이고 해시만 저장되며 기본 10분(`ENROLL_TTL_SECONDS`), 한 번만 쓰입니다. 페이지에서 PKCS#12 를 한 번 받고, 비밀번호와 Windows, macOS, iOS, Android, Linux 설치 안내를 봅니다. `./webtop.sh enroll --name phone --minutes 10` 이 주소를 출력합니다. 발급, 폐기, 등록은 `deploy/logs/certadmin.log` 에 관리자 CN, IP, 국가가 남고 비밀번호와 토큰은 남지 않습니다.
+`/enroll/<토큰>` 은 클라이언트 인증서 없이 열리지만, 국가 제한은 그대로입니다. 토큰은 256비트 난수이고 해시만 저장되며 기본 10분(`ENROLL_TTL_SECONDS`)입니다. PKCS#12 는 한 번만 발급되고 한 번만 내려받습니다. 루트 CA 파일은 그 토큰이 만료되기 전까지, PKCS#12 를 받은 뒤에도 같은 페이지에서 받을 수 있습니다. 페이지에 SHA-256 과 SHA-1 지문, 그리고 Windows, macOS, iOS, Android, Linux 설치 순서가 나옵니다. 자세한 절차는 [인증서 설치](docs/cert-install.md) 에 있습니다. `./webtop.sh enroll --name phone --minutes 10` 이 주소를 출력합니다. 발급, 폐기, 등록은 `deploy/logs/certadmin.log` 에 관리자 CN, IP, 국가가 남고 비밀번호와 토큰은 남지 않습니다.
 
 ## mTLS, GeoIP, Compose
 
@@ -175,6 +175,8 @@ cp deploy/.env.example deploy/.env
 
 ```bash
 ./scripts/gen-certs.sh init
+# 선택: 이 CA 가 서명할 수 있는 이름만 허용. 이미 만든 CA 에는 적용되지 않습니다.
+# ./scripts/gen-certs.sh init --name-constraint webtop.example.com --name-constraint 127.0.0.1
 ./scripts/gen-certs.sh server --cn webtop.example.com \
   --san DNS:webtop.example.com,DNS:localhost,IP:127.0.0.1
 ./scripts/gen-certs.sh client laptop
@@ -189,14 +191,17 @@ cp deploy/.env.example deploy/.env
 
 PKCS#12 비밀번호 기본값은 `changeit` 입니다. `P12_PASS` 또는 `--p12-pass` 로 바꿉니다. 서버 인증서의 SAN 에 실제 접속 이름을 넣어야 브라우저가 이름을 맞춥니다.
 
+이름 제약은 새 CA 를 만들 때만 넣습니다. `--name-constraint` 는 반복할 수 있고, 도메인 또는 IP(단일 주소나 CIDR)를 받습니다. 도메인 제약은 그 이름과 하위 이름을 허용합니다. 제약은 CA 인증서의 critical nameConstraints 라서 나중에 고칠 수 없습니다. CA 를 바꾸면 서버 인증서와 모든 클라이언트 인증서를 다시 발급하고, 기기에 설치한 루트도 지운 뒤 다시 설치해야 합니다. 메뉴의 CA 생성에서도 같은 질문을 하며, 비우면 제약 없는 CA 가 만들어집니다.
+
+```bash
+./webtop.sh ca --name-constraint webtop.example.com --name-constraint 127.0.0.1
+```
+
+기본 서버 인증서 SAN 에는 요청한 도메인 외에 `localhost` 와 `127.0.0.1` 이 들어갑니다. 도메인만 제약하면 그 SAN 은 `openssl verify` 와 브라우저에서 거절됩니다. 서버 인증서에 넣을 이름을 제약에 포함하거나, SAN 에서 빼세요.
+
 ### 3. 클라이언트 인증서 설치
 
-CA 의 `ca.crt` 도 신뢰해야 서버 경고가 사라집니다. 클라이언트 쪽에는 `laptop.p12` 를 넣습니다.
-
-- **브라우저 (Chrome, Edge, Firefox)**: 설정 → 인증서 → 가져오기 → PKCS#12. Firefox 는 자체 저장소를 쓰므로 브라우저 안에서 가져옵니다. 사이트에 들어가면 인증서 선택 창이 뜹니다.
-- **macOS**: `laptop.p12` 를 더블 클릭해 키체인에 넣습니다. 시스템 또는 로그인 키체인. CA 인증서 `ca.crt` 는 키체인 접근에서 "항상 신뢰" 로 둡니다. Safari 와 Chrome 은 키체인을 사용합니다.
-- **iOS / iPadOS**: `.p12` 를 AirDrop 또는 메일로 보내고 설정 → 프로파일 다운로드에서 설치합니다. 설정 → 일반 → 정보 → 인증서 신뢰 설정에서 CA 를 루트로 켭니다. `.crt` CA 와 `.p12` 를 둘 다 설치하는 편이 낫습니다.
-- **Android**: 설정 → 보안 → 인증서 설치 → VPN 및 앱 사용자 인증서에 `.p12` 를 넣습니다. CA 는 "CA 인증서" 로 따로 설치합니다. 기기 PIN 이 없을 수 있습니다.
+순서는 **루트 CA 먼저**, 그 다음 클라이언트 `.p12` 입니다. 기기에 설치하는 것은 `ca.crt` 뿐이고 `ca.key` 는 서버에만 둡니다. 등록 페이지와 `/admin/` 에서 DER `.cer` 와 PEM `.crt` 를 받고, 표시된 SHA-256 과 SHA-1 지문을 기기 화면과 비교합니다. 한 글자라도 다르면 설치하지 않습니다. Windows, macOS, iOS, Android, Linux 의 저장소, Firefox 가 따로인 점, 제거와 교체는 [인증서 설치](docs/cert-install.md) 에 적어 두었습니다.
 
 허용되지 않은 나라의 공인 IP 는 TLS ClientHello 직후 연결이 끊기고, HTTP 응답은 없습니다. 허용된 주소인데 클라이언트 인증서가 없으면 Nginx 가 `400 No required SSL certificate was sent` 로 거절하고 webtop 으로 넘기지 않습니다. 폐기된 인증서는 `400 The SSL certificate error` 입니다.
 

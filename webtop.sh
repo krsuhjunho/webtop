@@ -39,6 +39,7 @@ OPT_HTTPS=""
 OPT_HTTP=""
 OPT_SCHEDULE=""
 OPT_MODE=""
+OPT_CONSTRAINTS=()
 
 if [[ -t 1 ]]; then
   C_RED=$'\033[1;31m'
@@ -114,7 +115,8 @@ usage() {
 명령:
   precheck              사전 점검
   env                   deploy/.env 작성 또는 수정
-  ca                    CA 생성
+  ca [--name-constraint 이름]
+                        CA 생성. 제약은 새 CA 에만 들어가며 반복할 수 있습니다
   server                서버 인증서 발급
   client <이름> [--admin] 클라이언트 인증서 발급. --admin 이면 OU=admin
   enroll                일회용 등록 링크 출력 (--name, --minutes)
@@ -143,6 +145,8 @@ usage() {
   --http-port N|none    HTTP 리다이렉트 포트. none 이면 끔
   --cn 도메인  --extra name,ip
   --name 장치  --p12-pass 비밀번호  --admin  --minutes N
+  --name-constraint 도메인|IP
+                        새 CA 가 서명할 수 있는 이름. 반복 가능
   --service webtop|nginx|geoipupdate|certadmin
   --yes                 업데이트 확인 질문을 생략
   --prune               적용 후 이전 dangling 이미지 삭제
@@ -567,11 +571,37 @@ server_exists() {
 }
 
 cmd_ca() {
+  local -a args=()
+  local -a parts=()
+  local raw item
   if ca_exists; then
+    if [[ ${#OPT_CONSTRAINTS[@]} -gt 0 ]]; then
+      err "CA가 이미 있습니다. 이름 제약은 인증서 안에 고정되어 있어 바꾸지 않습니다."
+      err "CA를 교체하면 서버 인증서와 모든 클라이언트 인증서를 다시 발급하고, 각 기기의 루트 CA 도 지운 뒤 다시 설치해야 합니다."
+      return 1
+    fi
     ok "CA가 이미 있습니다: ${CERT_DIR}/ca/ca.crt"
     return 0
   fi
-  "$GEN_CERTS" init
+  if [[ "$NONINTERACTIVE" -eq 1 ]]; then
+    for item in "${OPT_CONSTRAINTS[@]}"; do
+      args+=(--name-constraint "$item")
+    done
+  else
+    warn "이름 제약은 선택입니다. 비우면 이 CA 는 어떤 이름에도 서명할 수 있습니다."
+    warn "도메인이나 IP 를 넣으면 그 이름만 서명할 수 있는 critical nameConstraints 가 CA 에 들어갑니다."
+    warn "도메인 제약은 그 이름과 하위 이름을 허용합니다. 서버 인증서 SAN 이 제약 밖이면 브라우저가 인증서를 거절합니다."
+    warn "기본 서버 SAN 에는 localhost 와 127.0.0.1 이 포함됩니다. 도메인만 제약하면 그 둘은 검증에 실패합니다."
+    warn "나중에 CA 를 바꾸면 서버 인증서와 모든 클라이언트 인증서를 다시 발급하고, 기기에 설치한 루트를 지우고 다시 설치해야 합니다."
+    raw=$(prompt "허용할 도메인 또는 IP (쉼표로 여러 개, 없으면 Enter)" "")
+    IFS=',' read -r -a parts <<<"$raw"
+    for item in "${parts[@]}"; do
+      item=${item//[[:space:]]/}
+      [[ -z "$item" ]] && continue
+      args+=(--name-constraint "$item")
+    done
+  fi
+  "$GEN_CERTS" init "${args[@]}"
 }
 
 cmd_server() {
@@ -1209,6 +1239,9 @@ cmd_install() {
   fi
   cmd_precheck_ports || return 1
   if ca_exists; then
+    if [[ ${#OPT_CONSTRAINTS[@]} -gt 0 ]]; then
+      cmd_ca || return 1
+    fi
     ok "CA 생성을 건너뜁니다."
   else
     cmd_ca || return 1
@@ -1328,6 +1361,7 @@ parse_opts() {
       --cn) OPT_CN=$2; shift 2 ;;
       --extra) OPT_EXTRA=$2; shift 2 ;;
       --name) OPT_NAME=$2; shift 2 ;;
+      --name-constraint) OPT_CONSTRAINTS+=("$2"); shift 2 ;;
       --p12-pass) OPT_P12=$2; shift 2 ;;
       --service) OPT_SERVICE=$2; shift 2 ;;
       -h|--help) usage; exit 0 ;;
