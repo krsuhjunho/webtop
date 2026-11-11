@@ -3,7 +3,7 @@
 # prints that line. FILEBROWSER_NOAUTH=true turns login off; mTLS still applies.
 http:
   port: 80
-  baseURL: "/files"
+  baseURL: "/fi"
   trustProxyHeaders: true
 
 server:

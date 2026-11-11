@@ -1523,17 +1523,19 @@ cmd_filebrowser() {
       offer_fix_root_ids || return 1
       env_set FILEBROWSER on || return 1
       ensure_filebrowser_data_dir || return 1
-      ok "파일 브라우저를 켰습니다. 주소는 /files/ 입니다."
+      ok "파일 브라우저를 켰습니다. 주소는 /fi/ 입니다."
       info "로그인은 켜 둡니다. 처음 비밀번호는 ./webtop.sh filebrowser password"
+      info "/files/ 는 Kasm 웹 클라이언트의 파일 관리자입니다. Quantum 으로 보내지 않습니다."
       if ! have docker; then
         warn "docker 가 없어 컨테이너는 시작하지 않았습니다."
         return 0
       fi
-      compose up -d --no-deps filebrowser
+      compose up -d --no-deps --build nginx
+      compose up -d --no-deps --force-recreate filebrowser
       ;;
     off)
       env_set FILEBROWSER off || return 1
-      ok "파일 브라우저를 껐습니다. /files/ 는 502 입니다."
+      ok "파일 브라우저를 껐습니다. /fi/ 는 502 입니다."
       if ! have docker; then
         return 0
       fi

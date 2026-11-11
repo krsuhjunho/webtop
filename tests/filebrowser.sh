@@ -62,7 +62,14 @@ export STUB_LOG="$tmp/on.log"
 PATH="$stub:$PATH" bash "$ROOT/webtop.sh" filebrowser on >/dev/null
 grep -q '^FILEBROWSER=on$' "$ENV_FILE"
 grep -q -- '--profile filebrowser' "$STUB_LOG"
-grep -q 'up -d --no-deps filebrowser' "$STUB_LOG"
+grep -q 'up -d --no-deps --build nginx' "$STUB_LOG"
+grep -q 'up -d --no-deps --force-recreate filebrowser' "$STUB_LOG"
+grep -q 'baseURL: "/fi"' "$ROOT/deploy/filebrowser/config.yaml"
+grep -q 'location /fi/' "$ROOT/deploy/nginx/nginx.conf"
+if grep -q 'location /files/' "$ROOT/deploy/nginx/nginx.conf"; then
+  echo "nginx still proxies /files/ to filebrowser" >&2
+  exit 1
+fi
 test -d "$ROOT/deploy/filebrowser-data/tmp"
 
 export STUB_LOG="$tmp/off.log"

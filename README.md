@@ -229,7 +229,7 @@ services:
 
 ## 파일 브라우저
 
-선택 사항입니다. 기본은 꺼져 있습니다. [FileBrowser Quantum](https://github.com/gtsteffaniak/filebrowser) `ghcr.io/gtsteffaniak/filebrowser:2.0.2-stable-slim` 을 씁니다. amd64 와 arm64 이고, FFmpeg 가 없는 slim 이라 용량이 작습니다. 호스트 포트는 없습니다. Nginx 의 `/files/` 로만 들어가고, 데스크톱과 같은 mTLS 와 GeoIP 를 탑니다.
+선택 사항입니다. 기본은 꺼져 있습니다. [FileBrowser Quantum](https://github.com/gtsteffaniak/filebrowser) `ghcr.io/gtsteffaniak/filebrowser:2.0.2-stable-slim` 을 씁니다. amd64 와 arm64 이고, FFmpeg 가 없는 slim 이라 용량이 작습니다. 호스트 포트는 없습니다. 주소는 `/fi/` 이고, 데스크톱과 같은 mTLS 와 GeoIP 를 탑니다. KasmVNC 의 kclient 가 이미 `/files` 에서 자체 파일 관리자를 띄우므로 Quantum 은 그 경로를 쓰지 않습니다. `/files/` 는 webtop 으로 그대로 갑니다.
 
 ```bash
 ./webtop.sh filebrowser on
@@ -238,7 +238,7 @@ services:
 ./webtop.sh filebrowser password
 ```
 
-`on` 은 `deploy/.env` 의 `FILEBROWSER=on` 을 저장하고 compose profile `filebrowser` 로 컨테이너를 띄웁니다. 이후 `start`, `restart`, `update` 도 그 프로필을 포함합니다. `off` 는 설정을 끄고 컨테이너를 지웁니다. 꺼져 있으면 Nginx 는 그대로 뜨고 `/files/` 는 502 입니다.
+`on` 은 `deploy/.env` 의 `FILEBROWSER=on` 을 저장하고, Nginx 이미지를 다시 만든 뒤 compose profile `filebrowser` 로 컨테이너를 띄웁니다. Nginx 설정은 이미지 안에 있으므로 이 재빌드가 있어야 `/fi/` 가 Quantum 으로 갑니다. 이후 `start`, `restart`, `update` 도 그 프로필을 포함합니다. `off` 는 설정을 끄고 컨테이너를 지웁니다. 꺼져 있으면 Nginx 는 그대로 뜨고 `/fi/` 는 502 입니다.
 
 보는 디렉터리는 webtop 의 `/config` 와 같습니다. `WEBTOP_CONFIG_SOURCE` 에 호스트 경로를 두면 두 서비스가 그 경로를 같이 씁니다. 비어 있고 `deploy/compose.override.yml` 이 `/config` 에 디렉터리를 붙이면 그 경로를 같이 씁니다. 예:
 
