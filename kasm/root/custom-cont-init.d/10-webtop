@@ -73,9 +73,17 @@ if [ ! -f /config/.config/fcitx5/profile ]; then
   chown -R abc:abc /config/.config/fcitx5
 fi
 
-if [ ! -f /config/.config/mimeapps.list ]; then
-  cp /etc/xdg/mimeapps.list /config/.config/mimeapps.list
+# Always refresh video and audio handlers. An older /config can name
+# another player, and that file wins over the system mimeapps.list.
+if [ -x /usr/local/bin/webtop-mime ]; then
+  /usr/local/bin/webtop-mime /config/.config/mimeapps.list
+  if [ -f /config/.config/kde-mimeapps.list ]; then
+    /usr/local/bin/webtop-mime /config/.config/kde-mimeapps.list
+  fi
   chown abc:abc /config/.config/mimeapps.list
+  if [ -f /config/.config/kde-mimeapps.list ]; then
+    chown abc:abc /config/.config/kde-mimeapps.list
+  fi
 fi
 
 for ver in 3.0 4.0; do

@@ -189,9 +189,13 @@ RUN chmod 755 \
     /defaults/startwm_wayland.sh \
     /usr/local/bin/wrapped-brave \
     /usr/local/bin/webtop-tune \
+    /usr/local/bin/webtop-mime \
+    /usr/local/bin/webtop-patch-vlc \
     /kwin-xwayland.py \
     /etc/xdg/plasma-workspace/env/im.sh \
     /etc/profile.d/im.sh \
+ && cp /etc/xdg/mimeapps.list /usr/share/applications/mimeapps.list \
+ && python3 /usr/local/bin/webtop-patch-vlc \
  && python3 - <<'PY'
 from pathlib import Path
 path = Path("/usr/share/applications/brave-browser.desktop")

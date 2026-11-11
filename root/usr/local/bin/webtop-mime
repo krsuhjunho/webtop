@@ -1,0 +1,184 @@
+#!/usr/bin/env python3
+"""Point video and audio types at VLC in one mimeapps.list.
+
+Other types, comments, and desktop files already listed beside VLC stay.
+A missing file is created. Removed Associations cannot hide VLC for these types.
+"""
+
+import sys
+from pathlib import Path
+
+DESKTOP = "vlc.desktop"
+TYPES = (
+    "video/mp4",
+    "video/webm",
+    "video/x-matroska",
+    "video/x-matroska-3d",
+    "video/mpeg",
+    "video/ogg",
+    "video/quicktime",
+    "video/x-msvideo",
+    "video/x-ms-wmv",
+    "video/x-ms-asf",
+    "video/x-flv",
+    "video/x-m4v",
+    "video/3gpp",
+    "video/3gpp2",
+    "video/mp2t",
+    "audio/mpeg",
+    "audio/mp4",
+    "audio/x-m4a",
+    "audio/aac",
+    "audio/x-aac",
+    "audio/ogg",
+    "audio/flac",
+    "audio/x-flac",
+    "audio/x-wav",
+    "audio/wav",
+    "audio/webm",
+    "audio/opus",
+    "audio/x-opus+ogg",
+    "audio/x-vorbis+ogg",
+    "audio/x-ms-wma",
+    "application/ogg",
+)
+
+
+def split_sections(text):
+    sections = []
+    header = ""
+    lines = []
+    for line in text.splitlines():
+        if line.startswith("[") and line.endswith("]") and "=" not in line:
+            sections.append((header, lines))
+            header = line[1:-1].strip()
+            lines = []
+        else:
+            lines.append(line)
+    sections.append((header, lines))
+    return sections
+
+
+def line_key(line):
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#") or "=" not in stripped:
+        return None
+    return stripped.split("=", 1)[0].strip()
+
+
+def assoc_items(value):
+    return [item.strip() for item in value.split(";") if item.strip()]
+
+
+def format_assoc(items):
+    if not items:
+        return ""
+    return ";".join(items) + ";"
+
+
+def upsert(lines, key, value):
+    found = False
+    out = []
+    for line in lines:
+        if line_key(line) == key:
+            out.append(f"{key}={value}")
+            found = True
+        else:
+            out.append(line)
+    if not found:
+        if out and out[-1] != "":
+            out.append(f"{key}={value}")
+        else:
+            # Keep a trailing blank line at the end of the section.
+            if out and out[-1] == "":
+                out.insert(len(out) - 1, f"{key}={value}")
+            else:
+                out.append(f"{key}={value}")
+    return out
+
+
+def update_added(lines):
+    existing = {}
+    for line in lines:
+        key = line_key(line)
+        if key in TYPES:
+            value = line.split("=", 1)[1]
+            items = [item for item in assoc_items(value) if item != DESKTOP]
+            existing[key] = items
+    out = [line for line in lines if line_key(line) not in TYPES]
+    for key in TYPES:
+        others = existing.get(key, [])
+        value = format_assoc([DESKTOP, *others])
+        if out and out[-1] == "":
+            out.insert(len(out) - 1, f"{key}={value}")
+        else:
+            out.append(f"{key}={value}")
+    return out
+
+
+def update_removed(lines):
+    out = []
+    for line in lines:
+        key = line_key(line)
+        if key not in TYPES:
+            out.append(line)
+            continue
+        items = [item for item in assoc_items(line.split("=", 1)[1]) if item != DESKTOP]
+        if items:
+            out.append(f"{key}={format_assoc(items)}")
+    return out
+
+
+def ensure_section(sections, name):
+    for header, _lines in sections:
+        if header == name:
+            return sections
+    sections.append((name, []))
+    return sections
+
+
+def render(sections):
+    chunks = []
+    for header, lines in sections:
+        if header == "" and not any(line.strip() for line in lines):
+            continue
+        if header:
+            chunks.append(f"[{header}]")
+        chunks.extend(lines)
+    text = "\n".join(chunks).rstrip() + "\n"
+    return text
+
+
+def update_text(text):
+    sections = split_sections(text)
+    sections = ensure_section(sections, "Default Applications")
+    sections = ensure_section(sections, "Added Associations")
+    updated = []
+    for header, lines in sections:
+        if header == "Default Applications":
+            lines = upsert_many(lines)
+        elif header == "Added Associations":
+            lines = update_added(lines)
+        elif header == "Removed Associations":
+            lines = update_removed(lines)
+        updated.append((header, lines))
+    return render(updated)
+
+
+def upsert_many(lines):
+    for key in TYPES:
+        lines = upsert(lines, key, DESKTOP)
+    return lines
+
+
+def main():
+    if len(sys.argv) != 2:
+        sys.exit("usage: webtop-mime MIMEAPPS_LIST")
+    path = Path(sys.argv[1])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    original = path.read_text() if path.exists() else ""
+    path.write_text(update_text(original))
+
+
+if __name__ == "__main__":
+    main()

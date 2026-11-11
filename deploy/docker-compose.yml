@@ -1,6 +1,8 @@
 # Webtop plus an mTLS Nginx front end.
 # Webtop is only on the compose network. The host publishes HTTPS_PORT (default 443).
 # HTTP_PORT is optional: webtop.sh adds deploy/compose.http.yml when it is set.
+# deploy/compose.override.yml is added last when that file exists, so a
+# bind mount can replace webtop-config:/config.
 #
 #   cp deploy/.env.example deploy/.env   # MaxMind account id and license key
 #   ./scripts/gen-certs.sh init
