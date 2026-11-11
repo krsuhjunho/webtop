@@ -15,6 +15,8 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+import guide
+
 CERT_DIR = os.environ.get("CERT_DIR", "/certs")
 LOG_PATH = os.environ.get("LOG_PATH", "/logs/certadmin.log")
 ADMIN_CNS = {
@@ -424,22 +426,75 @@ def esc(value):
 def page(title, body):
     return (
         "<!DOCTYPE html><html lang='ko'><meta charset='utf-8'>"
-        f"<title>{esc(title)}</title><body><h1>{esc(title)}</h1>{body}</body></html>"
+        "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+        f"<title>{esc(title)}</title><style>"
+        "body{font-family:sans-serif;max-width:46rem;margin:1.5rem auto;padding:0 1rem;line-height:1.5}"
+        "code{font-family:ui-monospace,monospace;word-break:break-all}"
+        ".fp{font-size:1.05rem;background:#f4f4f4;padding:.6rem;border:1px solid #ccc}"
+        "details{margin:.4rem 0;border:1px solid #ddd;padding:.4rem .8rem}"
+        "summary{cursor:pointer;font-weight:600}"
+        "</style>"
+        f"<body><h1>{esc(title)}</h1>{body}</body></html>"
     )
 
 
-INSTRUCTIONS = """
-<h2>설치</h2>
-<ul>
-<li>Windows: .p12 를 더블 클릭하고 비밀번호를 입력한 뒤, 개인 저장소에 넣습니다.</li>
-<li>macOS: .p12 를 키체인 접근으로 가져옵니다. CA 인증서는 항상 신뢰로 둡니다.</li>
-<li>iOS: .p12 를 AirDrop 또는 메일로 보내고 설정에서 프로파일을 설치합니다. CA 도 함께 신뢰합니다.</li>
-<li>Android: 설정, 보안, 인증서 설치에서 VPN 및 앱 사용자 인증서로 .p12 를 넣습니다.</li>
-<li>Linux: Chrome 은 설정, 개인정보, 인증서에서 가져옵니다. Firefox 는 자체 저장소에 가져옵니다.</li>
-</ul>
-<p>CA 인증서(ca.crt)도 기기에 신뢰로 설치해야 서버 경고가 사라집니다.</p>
-"""
+def ca_cert_path():
+    return os.path.join(CERT_DIR, "ca", "ca.crt")
 
+
+def load_ca_pem():
+    path = ca_cert_path()
+    if not os.path.isfile(path):
+        return None
+    with open(path, "rb") as handle:
+        data = handle.read()
+    if b"PRIVATE KEY" in data or b"BEGIN CERTIFICATE" not in data:
+        return None
+    return data
+
+
+def ca_der(pem):
+    return subprocess.check_output(["openssl", "x509", "-outform", "DER"], input=pem)
+
+
+def ca_fingerprints():
+    pem = load_ca_pem()
+    if pem is None:
+        return "", ""
+    der = ca_der(pem)
+    sha256 = ":".join(f"{byte:02X}" for byte in hashlib.sha256(der).digest())
+    sha1 = ":".join(f"{byte:02X}" for byte in hashlib.sha1(der).digest())
+    return sha256, sha1
+
+
+def ca_block(prefix):
+    sha256, sha1 = ca_fingerprints()
+    return guide.ca_section(prefix, sha256, sha1)
+
+
+def install_block(user_agent):
+    return guide.install_guide(guide.detect_platform(user_agent))
+
+
+def enroll_state(token):
+    record, _data = lookup_token(token)
+    if record is None:
+        return "missing", None
+    if record.get("expires", 0) < now():
+        return "expired", record
+    if record.get("used"):
+        return "used", record
+    return "open", record
+
+
+def enroll_token_from(path, suffix):
+    rest = path[len("/enroll/") :]
+    if not rest.endswith(suffix):
+        return ""
+    token = rest[: -len(suffix)]
+    if not token or "/" in token:
+        return ""
+    return token
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "certadmin"
@@ -517,6 +572,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlparse(self.path).path
+        if path in ("/admin/ca.cer", "/admin/ca.crt"):
+            self.send_ca(path.endswith(".cer"), admin=True)
+            return
         if path == "/admin" or path == "/admin/":
             self.admin_page()
             return
@@ -528,9 +586,15 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self.download(path[len("/enroll/dl/") :], admin=False)
             return
+        if path.startswith("/enroll/") and (path.endswith("/ca.cer") or path.endswith("/ca.crt")):
+            suffix = "/ca.cer" if path.endswith("/ca.cer") else "/ca.crt"
+            token = enroll_token_from(path, suffix)
+            if token:
+                self.send_ca(suffix == "/ca.cer", admin=False, token=token)
+                return
         if path.startswith("/enroll/"):
             token = path[len("/enroll/") :]
-            if token:
+            if token and "/" not in token:
                 self.enroll_page(token)
                 return
         self.reply(404, page("없음", "<p>없는 주소입니다.</p>"))
@@ -549,7 +613,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path.startswith("/enroll/"):
             token = path[len("/enroll/") :]
-            if token and "/dl/" not in token:
+            if token and "/" not in token:
                 self.enroll_submit(token, form)
                 return
         self.reply(404, page("없음", "<p>없는 주소입니다.</p>"))
@@ -571,7 +635,9 @@ class Handler(BaseHTTPRequestHandler):
                 )
             )
         body = (
-            "<table border='1'><tr><th>CN</th><th>시리얼</th><th>만료</th><th>상태</th><th>관리자</th></tr>"
+            ca_block("/admin/ca")
+            + install_block(self.headers.get("User-Agent", ""))
+            + "<table border='1'><tr><th>CN</th><th>시리얼</th><th>만료</th><th>상태</th><th>관리자</th></tr>"
             + "".join(rows)
             + "</table>"
             + "<h2>발급</h2><form method='post' action='/admin/issue'>"
@@ -673,13 +739,24 @@ class Handler(BaseHTTPRequestHandler):
         if too_many_failures(ip):
             self.reply(429, page("제한", "<p>요청이 너무 많습니다.</p>"))
             return
-        rec, _data = lookup_token(token)
-        if rec is None:
+        state, rec = enroll_state(token)
+        if state == "missing":
             note_failure(ip)
             self.reply(404, page("없음", "<p>링크가 없습니다.</p>"))
             return
-        if rec.get("used") or rec.get("expires", 0) < now():
-            self.reply(410, page("만료", "<p>링크가 이미 사용되었거나 만료되었습니다.</p>"))
+        if state == "expired":
+            self.reply(410, page("만료", "<p>링크가 만료되었습니다.</p>"))
+            return
+        prefix = f"/enroll/{token}/ca"
+        guide_html = install_block(self.headers.get("User-Agent", ""))
+        if state == "used":
+            body = (
+                "<p>클라이언트 인증서는 이미 발급되었습니다. PKCS#12 는 다시 받을 수 없습니다. "
+                "루트 CA 는 이 링크가 만료되기 전까지 받을 수 있습니다.</p>"
+                + ca_block(prefix)
+                + guide_html
+            )
+            self.reply(200, page("기기 등록", body))
             return
         csrf = secrets.token_urlsafe(32)
         name = rec.get("name") or ""
@@ -689,10 +766,11 @@ class Handler(BaseHTTPRequestHandler):
             else "장치 이름 <input name='name'>"
         )
         body = (
-            "<form method='post'>"
-            f"<input type='hidden' name='csrf' value='{esc(csrf)}'>"
-            f"{field}<button>인증서 만들기</button></form>"
-            + INSTRUCTIONS
+            ca_block(prefix)
+            + "<form method='post'>"
+            + f"<input type='hidden' name='csrf' value='{esc(csrf)}'>"
+            + f"{field}<button>인증서 만들기</button></form>"
+            + guide_html
         )
         self.reply(
             200,
@@ -733,11 +811,51 @@ class Handler(BaseHTTPRequestHandler):
         item = stash(p12, f"{name}.p12")
         audit("enroll_use", name, serial, "ok", ip, self.country(), "-")
         body = (
-            f"<p>비밀번호: <code>{esc(password)}</code></p>"
-            f"<p><a href='/enroll/dl/{esc(item)}'>PKCS#12 한 번 받기</a></p>"
-            + INSTRUCTIONS
+            ca_block(f"/enroll/{token}/ca")
+            + f"<p>비밀번호: <code>{esc(password)}</code></p>"
+            + f"<p><a href='/enroll/dl/{esc(item)}'>PKCS#12 한 번 받기</a></p>"
+            + "<p>PKCS#12 는 한 번만 받을 수 있습니다. CA 인증서는 이 링크가 만료되기 전까지 다시 받을 수 있습니다.</p>"
+            + install_block(self.headers.get("User-Agent", ""))
         )
         self.reply(200, page("등록됨", body))
+
+    def send_ca(self, der, admin, token=None):
+        if admin:
+            if not self.admin_ok():
+                return
+        else:
+            if not self.proxy_ok():
+                return
+            ip = self.client_ip()
+            if too_many_failures(ip):
+                self.reply(429, page("제한", "<p>요청이 너무 많습니다.</p>"))
+                return
+            state, _record = enroll_state(token)
+            if state == "missing":
+                note_failure(ip)
+                self.reply(404, page("없음", "<p>링크가 없습니다.</p>"))
+                return
+            if state == "expired":
+                self.reply(410, page("만료", "<p>링크가 만료되었습니다.</p>"))
+                return
+        pem = load_ca_pem()
+        if pem is None:
+            self.reply(404, page("없음", "<p>CA 인증서가 없습니다.</p>"))
+            return
+        if der:
+            payload = ca_der(pem)
+            content_type = "application/x-x509-ca-cert"
+            filename = "webtop-ca.cer"
+        else:
+            payload = pem
+            content_type = "application/x-pem-file"
+            filename = "webtop-ca.crt"
+        self.reply(
+            200,
+            payload,
+            content_type,
+            extra=[("Content-Disposition", f'attachment; filename="{filename}"')],
+        )
 
     def download(self, item_id, admin):
         if admin:
