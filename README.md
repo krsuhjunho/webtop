@@ -1,8 +1,59 @@
 # Webtop
 
-브라우저로 쓰는 Ubuntu 26.04 KDE Plasma 데스크톱입니다. [linuxserver Selkies](https://github.com/linuxserver/docker-baseimage-selkies) `baseimage-selkies:ubunturesolute` 위에 KDE를 올리고, 한국어와 일본어 입력, zsh, 자주 쓰는 CLI를 넣었습니다. 세션 스크립트는 [linuxserver/docker-webtop](https://github.com/linuxserver/docker-webtop) `ubuntu-kde` 브랜치를 바탕으로 했고, 저장소 라이선스는 GPL-3.0-only 입니다.
+브라우저로 쓰는 데스크톱입니다. 기본 이미지는 Ubuntu 26.04 KDE Plasma 를 [linuxserver Selkies](https://github.com/linuxserver/docker-baseimage-selkies) `baseimage-selkies:ubunturesolute` 위에 올렸고, 한국어와 일본어 입력, zsh, 자주 쓰는 CLI를 넣었습니다. 세션 스크립트는 [linuxserver/docker-webtop](https://github.com/linuxserver/docker-webtop) `ubuntu-kde` 브랜치를 바탕으로 했고, 저장소 라이선스는 GPL-3.0-only 입니다.
 
-이미지는 `ghcr.io/krsuhjunho/webtop` 에 `linux/amd64` 와 `linux/arm64` 로 올라갑니다. 태그는 `latest`, UTC 기준 `yymmdd`, `sha-<커밋>` 입니다. `main` 푸시, 수동 실행, 매주 월요일 빌드가 베이스 이미지 갱신을 따라갑니다.
+GPU 가 없는 소형 ARM VM 에서는 KasmVNC + XFCE 변형이 더 가볍습니다. 두 변형은 같은 저장소에 따로 올라가고, mTLS Nginx 앞단은 둘 다 포트 3000 으로 붙습니다.
+
+이미지는 `ghcr.io/krsuhjunho/webtop` 에 `linux/amd64` 와 `linux/arm64` 로 올라갑니다. Selkies 태그는 `latest`, UTC 기준 `yymmdd`, `sha-<커밋>` 입니다. Kasm 태그는 `kasm`, `kasm-yymmdd`, `kasm-sha-<커밋>` 입니다. `main` 푸시, 수동 실행, 매주 월요일 빌드가 두 베이스 이미지 갱신을 따라갑니다.
+
+## 변형
+
+| | Selkies (기본) | Kasm |
+| --- | --- | --- |
+| 태그 | `latest` | `kasm` |
+| 베이스 | `baseimage-selkies:ubunturesolute` | `baseimage-kasmvnc:ubuntunoble` (Ubuntu 24.04, 빌드 때 `apt upgrade`) |
+| 데스크톱 | KDE Plasma, Wayland | XFCE, X11. KDE 세션은 넣지 않습니다 |
+| 웹 포트 | 3000 HTTP / 3001 HTTPS | 같음. 화면 소켓은 `/websockify`, 소리는 `/audio/socket.io`. 컨테이너 Nginx 가 3000 으로 모읍니다 |
+| 성능 프로파일 | `low-power`, `balanced`, `quality` | 없음. `./webtop.sh profile` 은 Selkies 전용이라고 알리고 환경 변수는 바꾸지 않습니다 |
+
+공통으로 들어가는 것은 시간대 `Asia/Tokyo`, 로케일 `ko_KR.UTF-8`, fcitx5(한글 + mozc) 자동 시작, 클립보드, Brave(GPU 래스터 끔), VLC, Gwenview, zsh 와 같은 CLI 입니다. Gwenview 는 이미지 보기만 쓰고 Plasma 데스크톱은 끌어오지 않습니다.
+
+서버에서 바꾸는 방법:
+
+```bash
+./webtop.sh variant kasm      # deploy/.env 에 WEBTOP_VARIANT=kasm, IMAGE_TAG=kasm
+./webtop.sh variant selkies   # WEBTOP_VARIANT=selkies, IMAGE_TAG=latest
+```
+
+실행 중인 `webtop` 컨테이너가 있으면 그 컨테이너만 새 태그로 다시 만듭니다. `/config` 볼륨은 그대로입니다. `update`, `check-update`, `auto-update` 는 `IMAGE_TAG` 를 봅니다. 비어 있거나 `latest`/`kasm` 이면 변형의 이동 태그를 따라가고, `kasm-251111` 처럼 고정한 태그는 그대로 둡니다.
+
+`deploy/.env` 를 직접 고칠 때는 두 값을 같이 맞춥니다.
+
+```bash
+WEBTOP_VARIANT=kasm
+IMAGE_TAG=kasm
+```
+
+직접 실행할 때는 이미지만 바꾸면 됩니다.
+
+```bash
+docker run -d \
+  --name webtop \
+  --shm-size=2g \
+  --security-opt seccomp:unconfined \
+  -e PUID=1000 \
+  -e PGID=1000 \
+  -e TZ=Asia/Tokyo \
+  -p 3001:3001 \
+  -v webtop-config:/config \
+  ghcr.io/krsuhjunho/webtop:kasm
+```
+
+Kasm 웹 클라이언트는 접속할 때마다 옆 메뉴의 스피커를 눌러야 소리가 났습니다. 브라우저는 사용자 입력이 있기 전에는 `AudioContext` 를 막으므로, 페이지에 넣은 `webtop-audio.js` 가 첫 클릭이나 키 입력에서 스피커 버튼과 같은 `audio()` 를 한 번만 호출합니다. 데스크톱은 iframe 이라 그 입력은 부모 페이지로 올라가지 않습니다. VNC 페이지에 넣은 같은 스크립트가 그 순간에 `parent.webtopEnableAudio()` 를 호출합니다. 스피커 버튼을 직접 누르면 훅은 끼어들지 않아 버튼이 두 번 토글되지 않습니다. 한 번 켠 뒤에는 버튼으로 끌 수 있습니다.
+
+`/config` 를 두 변형이 같이 씁니다. Selkies 가 만들어 둔 fcitx 자동 시작이 KWin 자리 표시자면 Kasm 시작 때 XFCE 용으로 바꿉니다. 그 외 fcitx 설정은 유지합니다. KDE 설정 파일은 XFCE 가 읽지 않습니다.
+
+아래 기능 설명은 Selkies KDE 기준입니다. Kasm 은 Wayland, KWin, Selkies 인코더 변수를 쓰지 않습니다.
 
 ## 기능
 
@@ -128,9 +179,11 @@ Selkies 는 캡처용 컴포지터와 KWin 이 중첩이라, 자판에 없는 �
 ./webtop.sh profile low-power
 ./webtop.sh profile balanced
 ./webtop.sh profile quality
+./webtop.sh variant kasm
+./webtop.sh variant selkies
 ```
 
-프로파일은 `deploy/.env` 를 고치고, webtop 컨테이너가 켜져 있으면 그 컨테이너만 다시 만듭니다.
+프로파일은 `deploy/.env` 를 고치고, webtop 컨테이너가 켜져 있으면 그 컨테이너만 다시 만듭니다. `WEBTOP_VARIANT=kasm` 이면 프로파일은 적용하지 않고 Selkies 전용이라고 알립니다. `variant` 는 `WEBTOP_VARIANT` 와 `IMAGE_TAG` 를 맞추고, 컨테이너가 켜져 있으면 그 태그로 다시 만듭니다.
 
 루트의 `./webtop.sh` 가 배포에 필요한 일을 한곳에서 처리합니다. 인자 없이 실행하면 한국어 번호 메뉴가 반복되고, 작업을 마친 뒤 Enter 로 메뉴에 돌아옵니다. 같은 일을 명령으로도 실행할 수 있습니다. 메뉴의 로그 보기는 컨테이너 이름(`webtop`, `webtop-nginx`, `webtop-certadmin`, `webtop-geoipupdate`)으로 최근 100줄을 보여주고, 실행 중이면 Ctrl+C 할 때까지 따라갑니다. Ctrl+C 는 스크립트를 끝내지 않고 메뉴로 돌아옵니다. 컨테이너가 없으면 경로와 함께 오류를 냅니다. 접속 로그는 `deploy/logs/access.log` 를 시간, 국가, CN, 요청, 상태로 보여 주고, certadmin 감사 로그와 업데이트 로그도 고를 수 있습니다.
 
@@ -151,6 +204,7 @@ Selkies 는 캡처용 컴포지터와 KWin 이 중첩이라, 자판에 없는 �
 ./webtop.sh access-log
 ./webtop.sh access-log certadmin
 ./webtop.sh check-update
+./webtop.sh variant kasm
 ./webtop.sh update --yes
 ./webtop.sh cron-install --schedule '0 6 * * 1' --mode check
 ./webtop.sh install --cn webtop.example.com --name laptop --p12-pass '비밀번호'
@@ -158,7 +212,7 @@ Selkies 는 캡처용 컴포지터와 KWin 이 중첩이라, 자판에 없는 �
 
 `install` 은 도구 확인, `.env`(포트 포함), 선택한 포트 점검, CA, 서버 인증서, 클라이언트 인증서, 스택 시작을 순서대로 하고, 이미 끝난 단계는 건너뜁니다. 443 이 다른 프로세스에 잡혀 있으면 HTTPS 기본값을 8443 으로 제안하고, 80 이 잡혀 있으면 HTTP 리다이렉트를 끌 수 있습니다. 값은 `HTTPS_PORT` 와 `HTTP_PORT`(비우면 HTTP 포트 없음)로 `deploy/.env` 에 저장됩니다. HTTP 를 켤 때만 `deploy/compose.http.yml` 이 함께 적용됩니다. Nginx 의 HTTP 리다이렉트는 443 이 아닐 때 `https://호스트:포트` 로 보냅니다.
 
-`update` 와 `check-update` 는 이 머신의 아키텍처에 해당하는 `ghcr.io/krsuhjunho/webtop:latest` 다이제스트를 실행 중인 컨테이너, 로컬 이미지와 비교합니다. 같으면 받지 않습니다. 다르면 맞는 `yymmdd` 태그를 보여주고, 확인 후 pull 합니다. `cron-install` 은 사용자 crontab 에 `webtop.sh auto-update` 를 넣습니다. 기본은 월요일 06:00 이고, `UPDATE_MODE=check` 이면 로그만, `apply` 이면 새 다이제스트일 때 적용합니다. 잠금은 `flock` 이고 기록은 `deploy/logs/update.log` 입니다.
+`update` 와 `check-update` 는 이 머신의 아키텍처에 해당하는 선택 태그(`IMAGE_TAG`, 기본 `latest`, Kasm 은 `kasm`) 다이제스트를 실행 중인 컨테이너, 로컬 이미지와 비교합니다. 같으면 받지 않습니다. 다르면 맞는 날짜 태그(`yymmdd` 또는 `kasm-yymmdd`)를 보여주고, 확인 후 pull 합니다. `cron-install` 은 사용자 crontab 에 `webtop.sh auto-update` 를 넣습니다. 기본은 월요일 06:00 이고, `UPDATE_MODE=check` 이면 로그만, `apply` 이면 새 다이제스트일 때 적용합니다. 잠금은 `flock` 이고 기록은 `deploy/logs/update.log` 입니다.
 
 라이선스 키와 PKCS#12 비밀번호는 메뉴에서 화면에 표시하지 않고 입력받습니다. 스택 명령은 `docker compose --env-file deploy/.env -f deploy/docker-compose.yml` 를 사용합니다.
 
@@ -270,7 +324,13 @@ docker compose --env-file deploy/.env -f deploy/docker-compose.yml up -d
 
 `/config` 볼륨은 유지됩니다. 이미지 쪽 fcitx/zsh 기본 파일은 홈에 같은 파일이 없을 때만 복사하므로, 이미 만든 설정은 덮어쓰지 않습니다. 주간 빌드의 날짜 태그는 UTC `yymmdd` 입니다.
 
-직접 빌드할 때 amd64 기본값은 인자 없이 됩니다. arm64 는 다음처럼 베이스 태그를 넘깁니다.
+Kasm 변형은 `Dockerfile.kasm` 입니다. 베이스는 `ghcr.io/linuxserver/baseimage-kasmvnc:ubuntunoble` 로 고정하고, 빌드 안에서 `apt upgrade` 합니다.
+
+```bash
+docker build -f Dockerfile.kasm -t webtop:kasm-local .
+```
+
+Selkies 를 직접 빌드할 때 amd64 기본값은 인자 없이 됩니다. arm64 는 다음처럼 베이스 태그를 넘깁니다.
 
 ```bash
 docker build \
@@ -279,7 +339,7 @@ docker build \
   -t webtop:local .
 ```
 
-GitHub Actions 는 amd64 를 `ubuntu-24.04`, arm64 를 `ubuntu-24.04-arm` 에서 네이티브로 빌드합니다. arm 러너가 없으면 같은 워크플로가 QEMU 로 arm64 를 다시 빌드합니다.
+GitHub Actions 는 Selkies 와 Kasm 을 각각 amd64 는 `ubuntu-24.04`, arm64 는 `ubuntu-24.04-arm` 에서 네이티브로 빌드합니다. arm 러너가 없으면 같은 워크플로가 QEMU 로 arm64 를 다시 빌드합니다. 주간 일정은 두 변형을 모두 다시 빌드합니다.
 
 ## 문제 해결
 

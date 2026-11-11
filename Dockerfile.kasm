@@ -1,0 +1,194 @@
+# syntax=docker/dockerfile:1
+#
+# KasmVNC + XFCE variant of the personal webtop. The Selkies KDE image stays
+# in Dockerfile and is published as :latest. This file is published as :kasm.
+#
+# Pin ubuntunoble. The base repo's :latest is Alpine, and the Ubuntu tag is
+# not rebuilt often, so the build also upgrades apt packages.
+
+ARG BASEIMAGE=ghcr.io/linuxserver/baseimage-kasmvnc:ubuntunoble
+
+FROM ${BASEIMAGE}
+
+ARG TARGETARCH
+ARG DEBIAN_FRONTEND=noninteractive
+ARG NERD_FONTS_VERSION=3.5.1
+
+LABEL org.opencontainers.image.title="webtop" \
+      org.opencontainers.image.description="Ubuntu 24.04 XFCE webtop (KasmVNC) with Korean and Japanese input" \
+      org.opencontainers.image.source="https://github.com/krsuhjunho/webtop" \
+      org.opencontainers.image.licenses="GPL-3.0-only" \
+      org.opencontainers.image.version="kasm"
+
+ENV TITLE="Webtop" \
+    TZ=Asia/Tokyo \
+    LANG=ko_KR.UTF-8 \
+    LANGUAGE=ko_KR:ko:ja_JP:ja:en \
+    LC_ALL=ko_KR.UTF-8 \
+    GTK_IM_MODULE=fcitx \
+    QT_IM_MODULE=fcitx \
+    QT_IM_MODULES=fcitx \
+    XMODIFIERS=@im=fcitx \
+    SDL_IM_MODULE=fcitx \
+    INPUT_METHOD=fcitx \
+    GLFW_IM_MODULE=ibus \
+    XKB_DEFAULT_RULES=evdev \
+    XKB_DEFAULT_MODEL=pc105 \
+    XKB_DEFAULT_LAYOUT=kr \
+    SHELL=/usr/bin/zsh \
+    START_DOCKER=false \
+    WEBTOP_PROFILE=low-power \
+    WEBTOP_BRAVE_LOW_CPU=1 \
+    BROWSER=/usr/local/bin/wrapped-brave
+
+RUN \
+  echo "**** upgrade pinned ubuntunoble base ****" && \
+  apt-get update && \
+  apt-get upgrade -y --no-install-recommends \
+    -o Dpkg::Options::=--force-confdef \
+    -o Dpkg::Options::=--force-confold && \
+  echo "**** package sources ****" && \
+  install -d -m 0755 /etc/apt/keyrings /usr/share/keyrings && \
+  curl -fsSL https://brave-browser-apt-release.s3.brave.com/brave-browser-archive-keyring.gpg \
+    -o /usr/share/keyrings/brave-browser-archive-keyring.gpg && \
+  echo "deb [signed-by=/usr/share/keyrings/brave-browser-archive-keyring.gpg arch=$(dpkg --print-architecture)] https://brave-browser-apt-release.s3.brave.com/ stable main" \
+    > /etc/apt/sources.list.d/brave-browser-release.list && \
+  apt-get update && \
+  echo "**** desktop, input, tools ****" && \
+  apt-get install -y --no-install-recommends \
+    bat \
+    brave-browser \
+    btop \
+    curl \
+    elementary-xfce-icon-theme \
+    eza \
+    fd-find \
+    fcitx5 \
+    fcitx5-config-qt \
+    fcitx5-frontend-all \
+    fcitx5-hangul \
+    fcitx5-mozc \
+    fonts-noto-cjk \
+    fonts-noto-color-emoji \
+    fonts-noto-core \
+    fonts-noto-mono \
+    fzf \
+    gedit \
+    git \
+    greybird-gtk-theme \
+    gwenview \
+    htop \
+    im-config \
+    jq \
+    language-pack-ja \
+    language-pack-ko \
+    mousepad \
+    ncdu \
+    neovim \
+    p7zip-full \
+    pavucontrol \
+    ripgrep \
+    rsync \
+    sudo \
+    thunar \
+    tmux \
+    tree \
+    unzip \
+    vim \
+    vlc \
+    vlc-plugin-qt \
+    wget \
+    xdg-user-dirs \
+    xfce4 \
+    xfce4-notifyd \
+    xfce4-pulseaudio-plugin \
+    xfce4-terminal \
+    xubuntu-default-settings \
+    yq \
+    zoxide \
+    zsh && \
+  if [ -x /usr/bin/batcat ] && [ ! -e /usr/local/bin/bat ]; then ln -s /usr/bin/batcat /usr/local/bin/bat; fi && \
+  if [ -x /usr/bin/fdfind ] && [ ! -e /usr/local/bin/fd ]; then ln -s /usr/bin/fdfind /usr/local/bin/fd; fi && \
+  if [ -x /usr/libexec/docker/cli-plugins/docker-compose ]; then ln -sf /usr/libexec/docker/cli-plugins/docker-compose /usr/local/bin/docker-compose; fi && \
+  im-config -n fcitx5 || true && \
+  echo "**** fonts ****" && \
+  mkdir -p /usr/local/share/fonts/hack-nerd /usr/local/share/fonts/d2coding /tmp/hack /tmp/d2 && \
+  curl -fsSL -o /tmp/Hack.zip "https://github.com/ryanoasis/nerd-fonts/releases/download/v${NERD_FONTS_VERSION}/Hack.zip" && \
+  unzip -q /tmp/Hack.zip -d /tmp/hack && \
+  find /tmp/hack -type f \( \
+      -name 'HackNerdFontMono-Regular.ttf' -o \
+      -name 'HackNerdFontMono-Bold.ttf' -o \
+      -name 'HackNerdFontMono-Italic.ttf' -o \
+      -name 'HackNerdFontMono-BoldItalic.ttf' \
+    \) -exec cp {} /usr/local/share/fonts/hack-nerd/ \; && \
+  curl -fsSL -o /tmp/D2Coding.zip "https://github.com/naver/d2codingfont/releases/download/VER1.3.2/D2Coding-Ver1.3.2-20180524.zip" && \
+  unzip -q /tmp/D2Coding.zip -d /tmp/d2 && \
+  find /tmp/d2 -type f -name '*.ttf' -exec cp {} /usr/local/share/fonts/d2coding/ \; && \
+  fc-cache -f && \
+  echo "**** oh-my-zsh ****" && \
+  git clone --depth 1 https://github.com/ohmyzsh/ohmyzsh.git /usr/share/oh-my-zsh && \
+  rm -rf /usr/share/oh-my-zsh/.git && \
+  echo "**** brave launcher and session cleanup ****" && \
+  if [ -f /usr/share/applications/brave-browser.desktop ]; then \
+    sed -i \
+      -e 's#Exec=/usr/bin/brave-browser-stable#Exec=/usr/local/bin/wrapped-brave#g' \
+      -e 's#Exec=brave-browser-stable#Exec=/usr/local/bin/wrapped-brave#g' \
+      -e 's#Exec=/usr/bin/brave-browser#Exec=/usr/local/bin/wrapped-brave#g' \
+      -e 's#Exec=brave-browser#Exec=/usr/local/bin/wrapped-brave#g' \
+      /usr/share/applications/brave-browser.desktop; \
+  fi && \
+  rm -f \
+    /etc/xdg/autostart/xscreensaver.desktop \
+    /etc/xdg/autostart/xfce4-screensaver.desktop \
+    /etc/xdg/autostart/light-locker.desktop && \
+  echo "**** cleanup ****" && \
+  apt-get autoremove -y && \
+  apt-get clean && \
+  rm -rf \
+    /config/.cache \
+    /config/.launchpadlib \
+    /tmp/* \
+    /var/lib/apt/lists/* \
+    /var/tmp/*
+
+COPY kasm/root/ /
+COPY kasm/webtop-audio.js /usr/local/share/webtop/webtop-audio.js
+COPY kasm/patch-web.py /tmp/patch-web.py
+COPY root/usr/local/bin/wrapped-brave /usr/local/bin/wrapped-brave
+COPY root/etc/fonts/conf.d/69-webtop-fonts.conf /etc/fonts/conf.d/69-webtop-fonts.conf
+COPY root/etc/xdg/fcitx5 /etc/xdg/fcitx5
+COPY root/etc/xdg/gtk-3.0/settings.ini /etc/xdg/gtk-3.0/settings.ini
+COPY root/etc/xdg/gtk-4.0/settings.ini /etc/xdg/gtk-4.0/settings.ini
+COPY root/etc/xdg/mimeapps.list /etc/xdg/mimeapps.list
+COPY root/etc/polkit-1/rules.d/49-sudo.rules /etc/polkit-1/rules.d/49-sudo.rules
+COPY root/usr/share/webtop/zshrc /usr/share/webtop/zshrc
+
+RUN chmod 755 \
+    /custom-cont-init.d/10-webtop \
+    /defaults/startwm.sh \
+    /etc/profile.d/im.sh \
+    /usr/local/bin/wrapped-brave \
+ && python3 /tmp/patch-web.py /kclient/public/index.html parent \
+ && python3 /tmp/patch-web.py /usr/share/kasmvnc/www/index.html frame \
+ && if [ -f /usr/share/kasmvnc/www/vnc.html ]; then python3 /tmp/patch-web.py /usr/share/kasmvnc/www/vnc.html frame; fi \
+ && cp /usr/local/share/webtop/webtop-audio.js /kclient/public/js/webtop-audio.js \
+ && cp /usr/local/share/webtop/webtop-audio.js /usr/share/kasmvnc/www/webtop-audio.js \
+ && rm -f /tmp/patch-web.py \
+ && python3 - <<'PY'
+from pathlib import Path
+path = Path("/usr/share/applications/brave-browser.desktop")
+if path.exists():
+    lines = path.read_text().splitlines()
+    section = ""
+    out = []
+    for line in lines:
+        if line.startswith("["):
+            section = line.strip()
+        if section == "[Desktop Action new-window]" and line.startswith("Exec=") and "--new-window" not in line:
+            line = line.rstrip() + " --new-window"
+        out.append(line)
+    path.write_text("\n".join(out) + "\n")
+PY
+
+EXPOSE 3000 3001
+VOLUME /config

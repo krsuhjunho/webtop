@@ -66,4 +66,16 @@ sed -i 's/^SELKIES_AUDIO_ENABLED=.*/SELKIES_AUDIO_ENABLED=false/' "$envfile"
 bash "$ROOT/webtop.sh" profile quality
 grep -q '^SELKIES_AUDIO_ENABLED=false$' "$envfile"
 grep -q '^SELKIES_FRAMERATE=60$' "$envfile"
+# Kasm ignores Selkies encoder knobs.
+bash "$ROOT/webtop.sh" variant kasm
+grep -q '^WEBTOP_VARIANT=kasm$' "$envfile"
+grep -q '^IMAGE_TAG=kasm$' "$envfile"
+encoder_before=$(grep '^SELKIES_ENCODER=' "$envfile")
+out=$(bash "$ROOT/webtop.sh" profile balanced 2>&1)
+printf '%s\n' "$out" | grep -q 'Selkies 전용'
+grep -q "^${encoder_before}$" "$envfile"
+grep -q '^WEBTOP_PROFILE=quality$' "$envfile"
+bash "$ROOT/webtop.sh" variant selkies
+grep -q '^WEBTOP_VARIANT=selkies$' "$envfile"
+grep -q '^IMAGE_TAG=latest$' "$envfile"
 echo "performance profile ok"

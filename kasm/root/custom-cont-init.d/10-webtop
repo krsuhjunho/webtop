@@ -1,0 +1,108 @@
+#!/usr/bin/with-contenv bash
+# First-boot home seeding and per-start locale/timezone refresh for XFCE.
+set -eu
+
+TZ_VALUE="${TZ:-Asia/Tokyo}"
+if [ -f "/usr/share/zoneinfo/${TZ_VALUE}" ]; then
+  ln -snf "/usr/share/zoneinfo/${TZ_VALUE}" /etc/localtime
+  printf '%s\n' "$TZ_VALUE" > /etc/timezone
+fi
+
+LANG_VALUE="${LANG:-ko_KR.UTF-8}"
+LC_VALUE="${LC_ALL:-$LANG_VALUE}"
+# A value with no colon was collapsed by the base image. Keep a real chain.
+case "${LANGUAGE:-}" in
+  *:*) LANGUAGE_VALUE="$LANGUAGE" ;;
+  *) LANGUAGE_VALUE="ko_KR:ko:ja_JP:ja:en" ;;
+esac
+cat > /etc/default/locale <<EOF
+LANG=${LANG_VALUE}
+LC_ALL=${LC_VALUE}
+LANGUAGE=${LANGUAGE_VALUE}
+EOF
+
+tmp=$(mktemp)
+if [ -f /etc/environment ]; then
+  grep -vE '^(LANG|LANGUAGE|LC_ALL|TZ|GTK_IM_MODULE|QT_IM_MODULE|QT_IM_MODULES|XMODIFIERS|SDL_IM_MODULE|INPUT_METHOD|GLFW_IM_MODULE|XKB_DEFAULT_RULES|XKB_DEFAULT_MODEL|XKB_DEFAULT_LAYOUT)=' /etc/environment > "$tmp" || true
+else
+  : > "$tmp"
+fi
+cat >> "$tmp" <<EOF
+LANG=${LANG_VALUE}
+LANGUAGE=${LANGUAGE_VALUE}
+LC_ALL=${LC_VALUE}
+TZ=${TZ_VALUE}
+GTK_IM_MODULE=${GTK_IM_MODULE:-fcitx}
+QT_IM_MODULE=${QT_IM_MODULE:-fcitx}
+QT_IM_MODULES=${QT_IM_MODULES:-fcitx}
+XMODIFIERS=${XMODIFIERS:-@im=fcitx}
+SDL_IM_MODULE=${SDL_IM_MODULE:-fcitx}
+INPUT_METHOD=${INPUT_METHOD:-fcitx}
+GLFW_IM_MODULE=${GLFW_IM_MODULE:-ibus}
+XKB_DEFAULT_RULES=${XKB_DEFAULT_RULES:-evdev}
+XKB_DEFAULT_MODEL=${XKB_DEFAULT_MODEL:-pc105}
+XKB_DEFAULT_LAYOUT=${XKB_DEFAULT_LAYOUT:-kr}
+EOF
+mv "$tmp" /etc/environment
+
+if id abc >/dev/null 2>&1; then
+  usermod -s /usr/bin/zsh abc || true
+fi
+
+if [ ! -f /etc/sudoers.d/abc ]; then
+  echo 'abc ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/abc
+  chmod 440 /etc/sudoers.d/abc
+fi
+
+install -d -o abc -g abc \
+  /config \
+  /config/.config \
+  /config/.config/fcitx5 \
+  /config/.config/autostart \
+  /config/.config/gtk-3.0 \
+  /config/.config/gtk-4.0 \
+  /config/Desktop
+
+if [ ! -f /config/.zshrc ]; then
+  cp /usr/share/webtop/zshrc /config/.zshrc
+  chown abc:abc /config/.zshrc
+fi
+
+if [ ! -f /config/.config/fcitx5/profile ]; then
+  cp -a /etc/xdg/fcitx5/. /config/.config/fcitx5/
+  chown -R abc:abc /config/.config/fcitx5
+fi
+
+if [ ! -f /config/.config/mimeapps.list ]; then
+  cp /etc/xdg/mimeapps.list /config/.config/mimeapps.list
+  chown abc:abc /config/.config/mimeapps.list
+fi
+
+for ver in 3.0 4.0; do
+  dest="/config/.config/gtk-${ver}/settings.ini"
+  if [ ! -f "$dest" ]; then
+    cp "/etc/xdg/gtk-${ver}/settings.ini" "$dest"
+    chown abc:abc "$dest"
+  fi
+done
+
+# Selkies seeds a hidden autostart so KWin owns fcitx5. XFCE has no KWin,
+# so that placeholder must become a real autostart. Leave any other file.
+autostart=/config/.config/autostart/org.fcitx.Fcitx5.desktop
+write_autostart() {
+  cat > "$autostart" <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=Fcitx 5
+Comment=Korean and Japanese input
+Exec=/usr/bin/fcitx5 -d --replace
+Icon=fcitx
+X-GNOME-Autostart-enabled=true
+EOF
+  chown abc:abc "$autostart"
+}
+if [ ! -f "$autostart" ]; then
+  write_autostart
+elif grep -q 'Started by KWin' "$autostart"; then
+  write_autostart
+fi

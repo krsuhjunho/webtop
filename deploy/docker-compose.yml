@@ -12,7 +12,9 @@ name: webtop
 
 services:
   webtop:
-    image: ghcr.io/krsuhjunho/webtop:latest
+    # IMAGE_TAG selects the variant. latest is Selkies KDE. kasm is KasmVNC XFCE.
+    # Both listen on 3000, including Kasm websockets (/websockify, /audio/socket.io).
+    image: ghcr.io/krsuhjunho/webtop:${IMAGE_TAG:-latest}
     container_name: webtop
     restart: unless-stopped
     shm_size: "2gb"
@@ -95,7 +97,8 @@ services:
       ALLOWED_COUNTRIES: ${ALLOWED_COUNTRIES:-KR,JP}
       ADMIN_CNS: ${ADMIN_CNS:-}
       CERTADMIN_PROXY_SECRET: ${CERTADMIN_PROXY_SECRET:?set CERTADMIN_PROXY_SECRET in deploy/.env}
-      WEBTOP_UPSTREAM: webtop:3000
+      # KasmVNC and Selkies both publish the web client and websockets on 3000.
+      WEBTOP_UPSTREAM: ${WEBTOP_UPSTREAM:-webtop:3000}
       HTTPS_PORT: ${HTTPS_PORT:-443}
     ports:
       - "${HTTPS_PORT:-443}:443"
