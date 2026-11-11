@@ -11,8 +11,10 @@ COMPOSE_FILE="$ROOT/deploy/docker-compose.yml"
 COMPOSE_HTTP="$ROOT/deploy/compose.http.yml"
 CERT_DIR="$ROOT/deploy/certs"
 GEN_CERTS="$ROOT/scripts/gen-certs.sh"
-ACCESS_LOG="$ROOT/deploy/logs/access.log"
-UPDATE_LOG="$ROOT/deploy/logs/update.log"
+ACCESS_LOG="${WEBTOP_ACCESS_LOG:-$ROOT/deploy/logs/access.log}"
+CERTADMIN_LOG="${WEBTOP_CERTADMIN_LOG:-$ROOT/deploy/logs/certadmin.log}"
+LOG_TAIL=100
+UPDATE_LOG="${WEBTOP_UPDATE_LOG:-$ROOT/deploy/logs/update.log}"
 UPDATE_LOCK="$ROOT/deploy/logs/update.lock"
 IMAGE_REF="ghcr.io/krsuhjunho/webtop:latest"
 CRONTAB=${CRONTAB:-crontab}
@@ -40,6 +42,7 @@ OPT_HTTP=""
 OPT_SCHEDULE=""
 OPT_MODE=""
 OPT_CONSTRAINTS=()
+OPT_PROFILE=""
 
 if [[ -t 1 ]]; then
   C_RED=$'\033[1;31m'
@@ -126,10 +129,13 @@ usage() {
   stop                  스택 중지
   restart               스택 재시작
   status                상태
-  logs <서비스>         로그 (비대화형이면 최근 100줄)
-  access                접속 로그
+  logs [서비스]         컨테이너 로그. 없으면 all
+                        webtop|nginx|geoipupdate|certadmin|all
+  access                접속 로그 (access-log 와 같음)
+  access-log [종류]     access|certadmin|update. 메뉴에서는 따라가기
   geo-status            GeoIP DB, 허용 국가, Nginx 네트워크 모드
   geo-test <ip>         그 IP 를 Nginx 의 mmdb 로 조회하고 허용/거부를 출력
+  profile <이름>        low-power, balanced, quality. .env 를 고치고 webtop 을 다시 만듭니다
   update                새 버전이 있을 때만 이미지 업데이트
   check-update          업데이트 확인만
   auto-update           cron 용. UPDATE_MODE 에 따라 확인 또는 적용
@@ -149,8 +155,9 @@ usage() {
   --name 장치  --p12-pass 비밀번호  --admin  --minutes N
   --name-constraint 도메인|IP
                         새 CA 가 서명할 수 있는 이름. 반복 가능
-  --service webtop|nginx|geoipupdate|certadmin
+  --service webtop|nginx|geoipupdate|certadmin|all
   geo-test 의 IP 는 명령 뒤에 그대로 적습니다
+  --profile low-power|balanced|quality
   --yes                 업데이트 확인 질문을 생략
   --prune               적용 후 이전 dangling 이미지 삭제
   --schedule '0 6 * * 1'
@@ -973,35 +980,372 @@ cmd_geo_test() {
   [[ "$decision" == "ALLOW" ]]
 }
 
-cmd_logs() {
-  local svc=${OPT_SERVICE:-}
-  if [[ -z "$svc" ]]; then
-    if [[ "$NONINTERACTIVE" -eq 1 ]]; then
-      err "서비스가 필요합니다. 예: ./webtop.sh logs nginx"
-      return 1
-    fi
-    svc=$(prompt "서비스 (webtop/nginx/geoipupdate/certadmin)" "nginx")
+ask_tty() {
+  local label=$1 default=$2 reply
+  if [[ "$NONINTERACTIVE" -eq 1 || ! -r /dev/tty ]]; then
+    printf '%s' "$default"
+    return 0
   fi
-  case "$svc" in
-    webtop|nginx|geoipupdate|certadmin) ;;
-    *) err "서비스는 webtop, nginx, geoipupdate, certadmin 중 하나여야 합니다."; return 1 ;;
+  if [[ -n "$default" ]]; then
+    printf '%s [%s]: ' "$label" "$default" >/dev/tty
+  else
+    printf '%s: ' "$label" >/dev/tty
+  fi
+  IFS= read -r reply </dev/tty || true
+  printf '%s' "${reply:-$default}"
+}
+
+service_container() {
+  case "$1" in
+    webtop) printf '%s' webtop ;;
+    nginx) printf '%s' webtop-nginx ;;
+    geoipupdate) printf '%s' webtop-geoipupdate ;;
+    certadmin) printf '%s' webtop-certadmin ;;
+    *) return 1 ;;
   esac
-  require_env_file || return 1
-  if [[ "$NONINTERACTIVE" -eq 1 || ! -t 1 ]]; then
-    compose logs --tail=100 "$svc"
+}
+
+# 0 running, 1 stopped, 2 missing, 3 docker unreachable
+inspect_container() {
+  local name=$1 err
+  INSPECT_STATE=""
+  INSPECT_ERR=""
+  err=$(mktemp)
+  if ! INSPECT_STATE=$(docker inspect -f '{{.State.Running}}' "$name" 2>"$err"); then
+    INSPECT_ERR=$(cat "$err")
+    rm -f "$err"
+    if grep -qi 'permission denied\|Cannot connect' <<<"$INSPECT_ERR"; then
+      return 3
+    fi
+    return 2
+  fi
+  rm -f "$err"
+  if [[ "$INSPECT_STATE" == "true" ]]; then
+    return 0
+  fi
+  return 1
+}
+
+explain_docker_failure() {
+  local name=$1 state=$2
+  case "$state" in
+    3)
+      err "Docker 에 연결하지 못했습니다. 소켓 권한을 확인하세요."
+      [[ -n "$INSPECT_ERR" ]] && printf '%s\n' "$INSPECT_ERR" >&2
+      ;;
+    2)
+      err "스택이 실행 중이 아닙니다. 컨테이너가 없습니다: ${name}"
+      err "먼저 ./webtop.sh start 로 스택을 시작하세요."
+      ;;
+    1)
+      err "컨테이너가 중지되어 있습니다: ${name}"
+      err "위는 중지 전까지의 로그입니다. 따라가지 않습니다."
+      ;;
+  esac
+}
+
+run_interruptible() {
+  local interrupted=0
+  if [[ "$NONINTERACTIVE" -eq 1 ]]; then
+    "$@"
     return $?
   fi
-  info "Ctrl+C 를 누르면 메뉴로 돌아갑니다."
-  compose logs -f --tail=100 "$svc" || true
+  info "최근 ${LOG_TAIL}줄부터 표시합니다. Ctrl+C 를 누르면 메뉴로 돌아갑니다."
+  trap 'interrupted=1' INT
+  "$@" || true
+  trap on_int INT
+  [[ "$interrupted" -eq 1 ]] && printf '\n'
+  return 0
+}
+
+show_container_logs() {
+  local svc=$1 name state follow=0
+  name=$(service_container "$svc") || return 1
+  inspect_container "$name"
+  state=$?
+  if [[ "$state" -eq 2 || "$state" -eq 3 ]]; then
+    explain_docker_failure "$name" "$state"
+    return 1
+  fi
+  if [[ "$NONINTERACTIVE" -eq 0 && -t 1 && "$state" -eq 0 ]]; then
+    follow=1
+  fi
+  if [[ "$follow" -eq 1 ]]; then
+    run_interruptible docker logs --tail "$LOG_TAIL" -f "$name"
+  else
+    docker logs --tail "$LOG_TAIL" "$name" || return 1
+    if [[ "$state" -eq 1 ]]; then
+      explain_docker_failure "$name" 1
+      return 1
+    fi
+  fi
+  return 0
+}
+
+show_all_logs() {
+  local svc name state found=0 running=0 spec
+  local -a follow=()
+  for svc in webtop nginx geoipupdate certadmin; do
+    name=$(service_container "$svc")
+    inspect_container "$name"
+    state=$?
+    if [[ "$state" -eq 3 ]]; then
+      explain_docker_failure "$name" 3
+      return 1
+    fi
+    if [[ "$state" -eq 2 ]]; then
+      continue
+    fi
+    found=1
+    if [[ "$state" -eq 0 ]]; then
+      running=1
+      follow+=("${svc}|${name}")
+    else
+      info "[$svc] ${name} (중지됨)"
+      docker logs --tail "$LOG_TAIL" "$name" || true
+    fi
+  done
+  if [[ "$found" -eq 0 ]]; then
+    err "스택이 실행 중이 아닙니다. webtop, webtop-nginx, webtop-geoipupdate, webtop-certadmin 컨테이너가 없습니다."
+    err "먼저 ./webtop.sh start 로 스택을 시작하세요."
+    return 1
+  fi
+  if [[ "$NONINTERACTIVE" -eq 1 || ! -t 1 || "$running" -eq 0 ]]; then
+    for spec in "${follow[@]}"; do
+      info "[${spec%%|*}] ${spec#*|}"
+      docker logs --tail "$LOG_TAIL" "${spec#*|}" || true
+    done
+    if [[ "$running" -eq 0 ]]; then
+      err "실행 중인 컨테이너가 없어 로그를 따라가지 않습니다."
+      return 1
+    fi
+    return 0
+  fi
+  info "최근 ${LOG_TAIL}줄부터 표시합니다. Ctrl+C 를 누르면 메뉴로 돌아갑니다."
+  local interrupted=0 monitor=0 psvc pname
+  local -a pids=()
+  [[ $- == *m* ]] && monitor=1
+  set -m
+  trap 'interrupted=1' INT
+  for spec in "${follow[@]}"; do
+    psvc=${spec%%|*}
+    pname=${spec#*|}
+    docker logs --tail "$LOG_TAIL" -f "$pname" 2>&1 | awk -v p="[${psvc}] " '{ print p $0; fflush() }' &
+    pids+=("$!")
+  done
+  while [[ "$interrupted" -eq 0 ]]; do
+    wait -n || true
+    if ! jobs -r >/dev/null 2>&1; then
+      break
+    fi
+    jobs -r | grep -q . || break
+  done
+  trap on_int INT
+  if [[ ${#pids[@]} -gt 0 ]]; then
+    kill "${pids[@]}" 2>/dev/null || true
+  fi
+  wait || true
+  [[ "$monitor" -eq 0 ]] && set +m
+  [[ "$interrupted" -eq 1 ]] && printf '\n'
+  return 0
+}
+
+apply_profile_env() {
+  local profile=$1
+  env_set WEBTOP_PROFILE "$profile" || return 1
+  case "$profile" in
+    low-power)
+      env_set SELKIES_ENCODER jpeg || return 1
+      env_set SELKIES_FRAMERATE 30 || return 1
+      env_set SELKIES_JPEG_QUALITY 55 || return 1
+      env_set SELKIES_VIDEO_CRF 32 || return 1
+      env_set SELKIES_USE_CPU true || return 1
+      env_set SELKIES_CPU_ENCODE_THREADING true || return 1
+      env_set SELKIES_VIDEO_STREAMING_MODE false || return 1
+      env_set SELKIES_USE_CSS_SCALING true || return 1
+      env_set SELKIES_SCALING_DPI 96 || return 1
+      env_set WEBTOP_BRAVE_LOW_CPU 1 || return 1
+      ;;
+    balanced)
+      env_set SELKIES_ENCODER h264enc || return 1
+      env_set SELKIES_FRAMERATE 30 || return 1
+      env_set SELKIES_JPEG_QUALITY 70 || return 1
+      env_set SELKIES_VIDEO_CRF 28 || return 1
+      env_set SELKIES_USE_CPU true || return 1
+      env_set SELKIES_CPU_ENCODE_THREADING true || return 1
+      env_set SELKIES_VIDEO_STREAMING_MODE false || return 1
+      env_set SELKIES_USE_CSS_SCALING false || return 1
+      env_set SELKIES_SCALING_DPI 96 || return 1
+      env_set WEBTOP_BRAVE_LOW_CPU 1 || return 1
+      ;;
+    quality)
+      env_set SELKIES_ENCODER h264enc || return 1
+      env_set SELKIES_FRAMERATE 60 || return 1
+      env_set SELKIES_JPEG_QUALITY 80 || return 1
+      env_set SELKIES_VIDEO_CRF 23 || return 1
+      env_set SELKIES_USE_CPU true || return 1
+      env_set SELKIES_CPU_ENCODE_THREADING true || return 1
+      env_set SELKIES_VIDEO_STREAMING_MODE false || return 1
+      env_set SELKIES_USE_CSS_SCALING false || return 1
+      env_set SELKIES_SCALING_DPI 120 || return 1
+      env_set WEBTOP_BRAVE_LOW_CPU 0 || return 1
+      ;;
+  esac
+  if [[ -z "$(env_get SELKIES_AUDIO_ENABLED)" ]]; then
+    env_set SELKIES_AUDIO_ENABLED true || return 1
+  fi
+}
+
+cmd_profile() {
+  local profile=${OPT_PROFILE:-${OPT_NAME:-}}
+  require_env_file || return 1
+  if [[ -z "$profile" ]]; then
+    if [[ "$NONINTERACTIVE" -eq 1 ]]; then
+      err "프로파일이 필요합니다. 예: ./webtop.sh profile low-power"
+      return 1
+    fi
+    info "현재 프로파일: $(env_get WEBTOP_PROFILE)"
+    profile=$(prompt "프로파일 (low-power/balanced/quality)" "low-power")
+  fi
+  case "$profile" in
+    low|low-power) profile="low-power" ;;
+    balanced|quality) ;;
+    *)
+      err "프로파일은 low-power, balanced, quality 중 하나여야 합니다."
+      return 1
+      ;;
+  esac
+  apply_profile_env "$profile" || return 1
+  ok "성능 프로파일을 ${profile} 로 저장했습니다."
+  info "  인코더=$(env_get SELKIES_ENCODER)  프레임=$(env_get SELKIES_FRAMERATE)  소리=$(env_get SELKIES_AUDIO_ENABLED)"
+  if ! have docker; then
+    warn "docker 가 없어 컨테이너는 다시 만들지 않았습니다."
+    return 0
+  fi
+  if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx webtop; then
+    info "webtop 컨테이너를 다시 만들어 환경 변수를 적용합니다."
+    compose up -d --no-deps --force-recreate webtop
+  else
+    info "webtop 이 꺼져 있습니다. 다음에 시작할 때 적용됩니다."
+  fi
+}
+
+cmd_logs() {
+  local svc=${OPT_SERVICE:-}
+  have docker || { err "docker 가 없습니다."; return 1; }
+  if [[ -z "$svc" ]]; then
+    if [[ "$NONINTERACTIVE" -eq 1 ]]; then
+      svc=all
+    else
+      svc=$(ask_tty "서비스 (webtop/nginx/geoipupdate/certadmin/all)" "nginx")
+    fi
+  fi
+  case "$svc" in
+    webtop|nginx|geoipupdate|certadmin) show_container_logs "$svc" ;;
+    all) show_all_logs ;;
+    *)
+      err "서비스는 webtop, nginx, geoipupdate, certadmin, all 중 하나여야 합니다."
+      return 1
+      ;;
+  esac
+}
+
+format_access_line() {
+  local line=$1 time country cn status method uri
+  time=${line%% *}
+  country="-"; cn="-"; status="-"; method="-"; uri="-"
+  [[ "$line" =~ country=\"([^\"]*)\" ]] && country=${BASH_REMATCH[1]}
+  [[ "$line" =~ cn=\"([^\"]*)\" ]] && cn=${BASH_REMATCH[1]}
+  [[ "$line" =~ status=([0-9]+) ]] && status=${BASH_REMATCH[1]}
+  [[ "$line" =~ method=([A-Z]+) ]] && method=${BASH_REMATCH[1]}
+  [[ "$line" =~ uri=\"([^\"]*)\" ]] && uri=${BASH_REMATCH[1]}
+  if [[ "$status" == "-" ]]; then
+    printf '%s\n' "$line"
+    return 0
+  fi
+  printf '%s  country=%s  cn=%s  %s %s  status=%s\n' \
+    "$time" "$country" "$cn" "$method" "$uri" "$status"
+}
+
+format_certadmin_line() {
+  local line=$1 ts _ip country admin action name _serial result
+  IFS=$'\t' read -r ts _ip country admin action name _serial result <<<"$line"
+  if [[ -z "$action" ]]; then
+    printf '%s\n' "$line"
+    return 0
+  fi
+  printf '%s  country=%s  admin=%s  %s  name=%s  %s\n' \
+    "$ts" "${country:--}" "${admin:--}" "$action" "${name:--}" "${result:--}"
+}
+
+log_kind_path() {
+  case "$1" in
+    access|nginx) printf '%s' "$ACCESS_LOG" ;;
+    certadmin|audit) printf '%s' "$CERTADMIN_LOG" ;;
+    update) printf '%s' "$UPDATE_LOG" ;;
+    *) return 1 ;;
+  esac
+}
+
+stream_log_file() {
+  local kind=$1 path=$2 line
+  if [[ ! -f "$path" ]]; then
+    err "로그 파일이 없습니다: ${path}"
+    if [[ "$kind" == "access" || "$kind" == "nginx" ]]; then
+      inspect_container webtop-nginx
+      case $? in
+        0) err "webtop-nginx 는 실행 중이지만 아직 이 경로에 기록을 남기지 않았습니다." ;;
+        1) err "webtop-nginx 컨테이너가 중지되어 있습니다." ;;
+        2) err "스택이 실행 중이 아닙니다. webtop-nginx 컨테이너가 없습니다." ;;
+        3) explain_docker_failure webtop-nginx 3 ;;
+      esac
+    fi
+    return 1
+  fi
+  if [[ ! -s "$path" ]]; then
+    warn "로그 파일이 비어 있습니다: ${path}"
+  fi
+  if [[ "$NONINTERACTIVE" -eq 1 || ! -t 1 ]]; then
+    while IFS= read -r line; do
+      case "$kind" in
+        access|nginx) format_access_line "$line" ;;
+        certadmin|audit) format_certadmin_line "$line" ;;
+        *) printf '%s\n' "$line" ;;
+      esac
+    done < <(tail -n "$LOG_TAIL" "$path")
+    return 0
+  fi
+  info "파일: ${path}"
+  info "최근 ${LOG_TAIL}줄부터 표시합니다. Ctrl+C 를 누르면 메뉴로 돌아갑니다."
+  local interrupted=0
+  trap 'interrupted=1' INT
+  tail -n "$LOG_TAIL" -f "$path" | while IFS= read -r line; do
+    case "$kind" in
+      access|nginx) format_access_line "$line" ;;
+      certadmin|audit) format_certadmin_line "$line" ;;
+      *) printf '%s\n' "$line" ;;
+    esac
+  done || true
+  trap on_int INT
+  [[ "$interrupted" -eq 1 ]] && printf '\n'
   return 0
 }
 
 cmd_access() {
-  if [[ ! -f "$ACCESS_LOG" ]]; then
-    warn "아직 접속 로그가 없습니다: ${ACCESS_LOG}"
-    return 0
+  local kind=${OPT_NAME:-}
+  if [[ -z "$kind" ]]; then
+    if [[ "$NONINTERACTIVE" -eq 1 ]]; then
+      kind=access
+    else
+      kind=$(ask_tty "로그 (access/certadmin/update)" "access")
+    fi
   fi
-  tail -n 80 "$ACCESS_LOG"
+  local path
+  path=$(log_kind_path "$kind") || {
+    err "로그 종류는 access, certadmin, update 중 하나여야 합니다."
+    return 1
+  }
+  stream_log_file "$kind" "$path"
 }
 
 host_arch() {
@@ -1408,6 +1752,7 @@ draw_menu() {
 19) 일회용 등록 링크
 20) GeoIP 상태
 21) GeoIP IP 시험
+22) 성능 프로파일
  0) 종료
 EOF
 }
@@ -1427,7 +1772,7 @@ menu_once() {
     10) cmd_restart || true ;;
     11) cmd_status || true ;;
     12) OPT_SERVICE=""; cmd_logs || true ;;
-    13) cmd_access || true ;;
+    13) OPT_NAME=""; cmd_access || true ;;
     14) cmd_update || true ;;
     15) cmd_install || true ;;
     16) cmd_check_update || true ;;
@@ -1436,6 +1781,7 @@ menu_once() {
     19) cmd_enroll || true ;;
     20) cmd_geo_status || true ;;
     21) OPT_NAME=""; cmd_geo_test || true ;;
+    22) cmd_profile || true ;;
     0|q|Q|exit) return 10 ;;
     "") ;;
     *) err "없는 번호입니다: ${choice}" ;;
@@ -1488,6 +1834,7 @@ parse_opts() {
       --name-constraint) OPT_CONSTRAINTS+=("$2"); shift 2 ;;
       --p12-pass) OPT_P12=$2; shift 2 ;;
       --service) OPT_SERVICE=$2; shift 2 ;;
+      --profile) OPT_PROFILE=$2; shift 2 ;;
       -h|--help) usage; exit 0 ;;
       --) shift; break ;;
       -*)
@@ -1541,7 +1888,7 @@ main() {
       OPT_NAME=""
       cmd_logs
       ;;
-    access) cmd_access ;;
+    access|access-log) cmd_access ;;
     geo-status) cmd_geo_status ;;
     geo-test) cmd_geo_test ;;
     update|pull) cmd_update ;;
@@ -1552,6 +1899,7 @@ main() {
     cron-remove) cmd_cron_remove ;;
     cron-status) cmd_cron_status ;;
     install) cmd_install ;;
+    profile) cmd_profile ;;
     *)
       err "알 수 없는 명령: ${cmd}"
       usage

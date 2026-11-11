@@ -1,0 +1,110 @@
+#!/bin/bash
+# Apply a desktop performance profile. Safe to run on every session start.
+# Wayland KWin still composites; this turns off the expensive effects.
+
+set -eu
+
+profile=${WEBTOP_PROFILE:-low-power}
+case "$profile" in
+  low|low-power) profile=low-power ;;
+  balanced|quality) ;;
+  *) profile=low-power ;;
+esac
+session=${1:-wayland}
+
+cfg() {
+  kwriteconfig6 --file "$1" --group "$2" --key "$3" "${4:-}"
+}
+
+if ! command -v kwriteconfig6 >/dev/null 2>&1; then
+  exit 0
+fi
+
+factor=0
+speed=0
+if [ "$profile" = "quality" ]; then
+  factor=0.5
+  speed=2
+fi
+cfg kdeglobals KDE AnimationDurationFactor "$factor"
+
+if [ "$session" = "x11" ] && [ "$profile" != "quality" ]; then
+  cfg kwinrc Compositing Enabled false
+else
+  cfg kwinrc Compositing Enabled true
+fi
+cfg kwinrc Compositing AnimationSpeed "$speed"
+cfg kwinrc Compositing LatencyPolicy Low
+cfg kwinrc Compositing GLCore false
+cfg kwinrc Compositing WindowsBlockCompositing true
+
+effect_value=false
+if [ "$profile" = "quality" ]; then
+  effect_value=true
+fi
+effects=(
+  blur contrast diminactive fadingpopups fallapart glide highlightwindow
+  magiclamp mouseclick overview scale sheet slide slidingpopups squash
+  startupfeedback trackmouse translucency windowaperture wobblywindows zoom
+  kwin4_effect_fade kwin4_effect_fadingpopups kwin4_effect_login
+  kwin4_effect_logout kwin4_effect_maximize kwin4_effect_morphingpopups
+  kwin4_effect_scale kwin4_effect_squash kwin4_effect_translucency
+  kwin4_effect_windowaperture
+)
+for effect in "${effects[@]}"; do
+  cfg kwinrc Plugins "${effect}Enabled" "$effect_value"
+done
+
+cfg baloofilerc "Basic Settings" Indexing-Enabled false
+if command -v balooctl6 >/dev/null 2>&1; then
+  balooctl6 disable >/dev/null 2>&1 || true
+elif command -v balooctl >/dev/null 2>&1; then
+  balooctl disable >/dev/null 2>&1 || true
+fi
+
+for module in baloosearchmodule bluedevil freemobile kdeconnect printmanager remotenotifier; do
+  cfg kded6rc "Module-${module}" autoload false
+  cfg kded5rc "Module-${module}" autoload false
+done
+
+cfg krunnerrc Plugins baloosearchEnabled false
+cfg krunnerrc Plugins bookmarksEnabled false
+cfg krunnerrc Plugins locationsEnabled false
+cfg krunnerrc Plugins recentdocumentsEnabled false
+cfg krunnerrc Plugins webshortcutsEnabled false
+
+if command -v akonadiserver >/dev/null 2>&1 || command -v akonadictl >/dev/null 2>&1; then
+  mkdir -p "${HOME}/.config/akonadi"
+  cat > "${HOME}/.config/akonadi/akonadiserverrc" <<'EOF'
+[%General]
+StartServer=false
+EOF
+fi
+
+mkdir -p "${HOME}/.config/autostart"
+hide_autostart() {
+  name=$1
+  src="/etc/xdg/autostart/${name}"
+  dest="${HOME}/.config/autostart/${name}"
+  if [ -f "$src" ]; then
+    cp "$src" "$dest"
+  else
+    printf '%s\n' '[Desktop Entry]' 'Type=Application' "Name=${name}" > "$dest"
+  fi
+  if grep -q '^Hidden=' "$dest"; then
+    sed -i 's/^Hidden=.*/Hidden=true/' "$dest"
+  else
+    printf '%s\n' 'Hidden=true' >> "$dest"
+  fi
+}
+for name in \
+  baloo_file.desktop \
+  org.kde.kdeconnect.daemon.desktop \
+  org.kde.kdeconnect.nonplasma.daemon.desktop \
+  org.kde.discover.notifier.desktop \
+  org.kde.plasma-discover.notifier.desktop \
+  org.kde.kalendarac.desktop \
+  org.freedesktop.PackageKit.desktop
+do
+  hide_autostart "$name"
+done

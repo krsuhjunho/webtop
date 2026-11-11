@@ -188,6 +188,7 @@ RUN chmod 755 \
     /defaults/startwm.sh \
     /defaults/startwm_wayland.sh \
     /usr/local/bin/wrapped-brave \
+    /usr/local/bin/webtop-tune \
     /kwin-xwayland.py \
     /etc/xdg/plasma-workspace/env/im.sh \
     /etc/profile.d/im.sh \
