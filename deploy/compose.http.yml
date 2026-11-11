@@ -1,4 +1,5 @@
-# Obsolete. Nginx uses the host network and binds HTTP_PORT itself.
-# webtop.sh no longer includes this file. Kept so an old command that
-# still passes -f deploy/compose.http.yml does not publish port 80 twice.
-services: {}
+# Added by webtop.sh only when HTTP_PORT is set in deploy/.env.
+services:
+  nginx:
+    ports:
+      - "${HTTP_PORT}:80"

@@ -24,65 +24,21 @@ if sudo docker inspect webtop-nginx >/dev/null 2>&1; then
   exit 1
 fi
 
-# Docker's published-port proxy presents the bridge gateway, not the client.
-sudo docker rm -f geo-peer >/dev/null 2>&1 || true
-sudo docker run -d --name geo-peer -p 127.0.0.1:18444:9443 python:3.13-alpine \
-  python -u -c 'import socket;s=socket.socket();s.bind(("0.0.0.0",9443));s.listen(1);c,a=s.accept();print("PEER",a[0],flush=True)' >/dev/null
-sleep 0.4
-python3 -c 'import socket;s=socket.create_connection(("127.0.0.1",18444),3);s.send(b"x");s.close()'
-sleep 0.3
-peer=$(sudo docker logs geo-peer 2>&1 | awk '/PEER/{print $2}')
-echo "docker-proxy peer=$peer"
-if [[ "$peer" != 172.* ]]; then
-  echo "expected the published port to hide the client behind a 172.x gateway, got $peer" >&2
-  exit 1
-fi
-sudo docker rm -f geo-peer >/dev/null
-
 (cd "$ROOT/tests/geo" && go run . "$MMDB")
 CERT_DIR="$WORKDIR/certs" "$ROOT/scripts/gen-certs.sh" init >/dev/null
 CERT_DIR="$WORKDIR/certs" "$ROOT/scripts/gen-certs.sh" server --cn webtop.local --san DNS:webtop.local,IP:192.0.2.1 >/dev/null
 SECRET=0123456789abcdef0123456789abcdef
 
-# Bridge mode must refuse to start. A missing docker0 means the proxy bypass is possible.
-set +e
-# shellcheck disable=SC2024
-sudo docker run --rm --name webtop-nginx \
+# Host network here is only so this test can choose the source address.
+# The running stack keeps Docker port publishing. External visitors already
+# show up with their real IP, as in client=130.62.218.125 country="JP".
+sudo docker run -d --name webtop-nginx --network host --add-host certadmin:127.0.0.1 \
   -e CERTADMIN_PROXY_SECRET="$SECRET" \
   -e ALLOWED_COUNTRIES=KR,JP \
-  -e HTTPS_PORT=18443 \
+  -e HTTPS_PORT=443 \
   -e HTTP_PORT= \
   -e WEBTOP_UPSTREAM=127.0.0.1:9 \
-  -e CERTADMIN_UPSTREAM=127.0.0.1:9 \
-  -e REQUIRE_HOST_NETWORK=1 \
-  -e GEOIP_WAIT_SECONDS=2 \
-  -v "$MMDB:/usr/share/GeoIP/GeoLite2-Country.mmdb:ro" \
-  -v "$WORKDIR/certs/ca/ca.crt:/etc/nginx/mtls/ca/ca.crt:ro" \
-  -v "$WORKDIR/certs/server:/etc/nginx/mtls/server:ro" \
-  -v "$WORKDIR/certs/crl:/etc/nginx/mtls/crl:ro" \
-  -v "$LOGS:/var/log/nginx" \
-  webtop-nginx:local >"$WORKDIR/bridge.out" 2>&1
-bridge_rc=$?
-set -e
-echo "bridge start rc=$bridge_rc"
-if ! grep -q 'REFUSING TO START' "$WORKDIR/bridge.out"; then
-  echo '--- bridge output ---' >&2
-  cat "$WORKDIR/bridge.out" >&2
-  exit 1
-fi
-if [[ "$bridge_rc" -eq 0 ]]; then
-  echo "bridge-mode nginx started" >&2
-  exit 1
-fi
-
-sudo docker run -d --name webtop-nginx --network host \
-  -e CERTADMIN_PROXY_SECRET="$SECRET" \
-  -e ALLOWED_COUNTRIES=KR,JP \
-  -e HTTPS_PORT=18443 \
-  -e HTTP_PORT= \
-  -e WEBTOP_UPSTREAM=127.0.0.1:9 \
-  -e CERTADMIN_UPSTREAM=127.0.0.1:9 \
-  -e REQUIRE_HOST_NETWORK=1 \
+  -e NGINX_RESOLVER=127.0.0.1 \
   -e GEOIP_WAIT_SECONDS=5 \
   -v "$MMDB:/usr/share/GeoIP/GeoLite2-Country.mmdb:ro" \
   -v "$WORKDIR/certs/ca/ca.crt:/etc/nginx/mtls/ca/ca.crt:ro" \
@@ -122,7 +78,7 @@ probe() {
   local err="$WORKDIR/curl-$src.err"
   # shellcheck disable=SC2024
   sudo ip netns exec geo-test curl --interface "$src" -k -sv --max-time 5 \
-    "https://192.0.2.1:18443/" -o /dev/null >"$err" 2>&1 || true
+    "https://192.0.2.1/" -o /dev/null >"$err" 2>&1 || true
   if grep -q 'Server certificate' "$err"; then
     echo "$src TLS"
   else
@@ -153,7 +109,7 @@ grep 'client=192.0.2.20' "$log" | grep -q 'country="KR"'
 grep 'client=192.0.2.20' "$log" | grep -q 'allowed=1'
 grep 'client=198.18.0.20' "$log" | grep -q 'allowed=0'
 if grep -q 'client=172.17.0.1' "$log"; then
-  echo "host-network nginx logged the docker gateway" >&2
+  echo "test client was rewritten to the docker gateway" >&2
   exit 1
 fi
 
@@ -169,12 +125,14 @@ my_out=$(bash "$ROOT/webtop.sh" geo-test 175.139.0.1 2>&1) && {
   echo "geo-test allowed Malaysia: $my_out" >&2
   exit 1
 }
-echo "$my_out" | grep -q 'country MY'
+echo "$my_out" | grep -q 'MaxMind 국가: MY'
+echo "$my_out" | grep -q '가상 위치'
 echo "$my_out" | grep -q 'decision DROP'
 kr_out=$(bash "$ROOT/webtop.sh" geo-test 192.0.2.20 2>&1)
-echo "$kr_out" | grep -q 'country KR'
+echo "$kr_out" | grep -q 'MaxMind 국가: KR'
+echo "$kr_out" | grep -q '가상 위치'
 echo "$kr_out" | grep -q 'decision ALLOW'
 status_out=$(bash "$ROOT/webtop.sh" geo-status 2>&1)
-echo "$status_out" | grep -q '네트워크 모드: host'
+echo "$status_out" | grep -q '허용 국가: KR,JP'
 echo "$status_out" | grep -q 'build_time='
 echo "geo allow regression ok"

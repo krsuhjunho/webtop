@@ -1,8 +1,6 @@
 # Webtop plus an mTLS Nginx front end.
-# Nginx uses the host network so it sees the visitor's real IP. Docker's
-# userland proxy would otherwise show 172.17.0.1 and the private-range allow
-# would let every country through. Webtop and certadmin stay on the bridge
-# and are published only on 127.0.0.1 for Nginx.
+# Webtop is only on the compose network. The host publishes HTTPS_PORT (default 443).
+# HTTP_PORT is optional: webtop.sh adds deploy/compose.http.yml when it is set.
 #
 #   cp deploy/.env.example deploy/.env   # MaxMind account id and license key
 #   ./scripts/gen-certs.sh init
@@ -28,9 +26,6 @@ services:
       LANGUAGE: ${LANGUAGE:-ko_KR:ko:ja_JP:ja:en}
       LC_ALL: ${LC_ALL:-ko_KR.UTF-8}
       TITLE: ${TITLE:-Webtop}
-    ports:
-      # Loopback only. Nginx on the host network proxies to this.
-      - "127.0.0.1:${WEBTOP_LOCAL_PORT:-33000}:3000"
     volumes:
       - webtop-config:/config
       # Host Docker socket, optional. The image ships the CLI and compose plugin only.
@@ -63,8 +58,6 @@ services:
       ENROLL_TTL_SECONDS: ${ENROLL_TTL_SECONDS:-600}
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
       HTTPS_PORT: ${HTTPS_PORT:-443}
-    ports:
-      - "127.0.0.1:${CERTADMIN_LOCAL_PORT:-18080}:8080"
     volumes:
       - ./certs:/certs
       - ./logs:/logs
@@ -85,18 +78,18 @@ services:
       ALLOWED_COUNTRIES: ${ALLOWED_COUNTRIES:-KR,JP}
       ADMIN_CNS: ${ADMIN_CNS:-}
       CERTADMIN_PROXY_SECRET: ${CERTADMIN_PROXY_SECRET:?set CERTADMIN_PROXY_SECRET in deploy/.env}
-      WEBTOP_UPSTREAM: 127.0.0.1:${WEBTOP_LOCAL_PORT:-33000}
-      CERTADMIN_UPSTREAM: 127.0.0.1:${CERTADMIN_LOCAL_PORT:-18080}
+      WEBTOP_UPSTREAM: webtop:3000
       HTTPS_PORT: ${HTTPS_PORT:-443}
-      HTTP_PORT: ${HTTP_PORT:-}
-      REQUIRE_HOST_NETWORK: "1"
-    network_mode: host
+    ports:
+      - "${HTTPS_PORT:-443}:443"
     volumes:
       - ./certs/ca/ca.crt:/etc/nginx/mtls/ca/ca.crt:ro
       - ./certs/server:/etc/nginx/mtls/server:ro
       - ./certs/crl:/etc/nginx/mtls/crl:ro
       - ./logs:/var/log/nginx
       - webtop-geoip:/usr/share/GeoIP:ro
+    networks:
+      - webtop
 
 networks:
   webtop:

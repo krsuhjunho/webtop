@@ -8,6 +8,7 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 ENV_EXAMPLE="$ROOT/deploy/.env.example"
 ENV_FILE="$ROOT/deploy/.env"
 COMPOSE_FILE="$ROOT/deploy/docker-compose.yml"
+COMPOSE_HTTP="$ROOT/deploy/compose.http.yml"
 CERT_DIR="$ROOT/deploy/certs"
 GEN_CERTS="$ROOT/scripts/gen-certs.sh"
 ACCESS_LOG="$ROOT/deploy/logs/access.log"
@@ -176,9 +177,14 @@ stack_nginx_running() {
 }
 
 compose() {
-  # HTTP_PORT is an environment value. Nginx binds it on the host network.
-  # Do not publish it again through compose.http.yml.
-  docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
+  local -a args
+  local http
+  args=(--env-file "$ENV_FILE" -f "$COMPOSE_FILE")
+  http=$(env_get HTTP_PORT)
+  if [[ -n "$http" ]]; then
+    args+=(-f "$COMPOSE_HTTP")
+  fi
+  docker compose "${args[@]}" "$@"
 }
 
 https_port_configured() {
@@ -864,10 +870,8 @@ cmd_geo_status() {
   db=$(docker exec webtop-nginx printenv GEOIP_DB 2>/dev/null || true)
   db=${db:-/usr/share/GeoIP/GeoLite2-Country.mmdb}
   info "네트워크 모드: ${mode}"
-  if [[ "$mode" != "host" ]]; then
-    err "Nginx 가 host 네트워크가 아닙니다. Docker 프록시가 방문자를 172.17.0.1 로 보여 주면 모든 국가가 통과합니다."
-  fi
   info "허용 국가: ${allowed:-KR,JP}"
+  info "판정은 access.log 의 client= 주소에 MaxMind 가 붙인 국가입니다. VPN 앱의 가상 위치 이름과 다를 수 있습니다."
   info "DB: ${db}"
   docker exec webtop-nginx sh -c "ls -l \"$db\"; echo size=\$(wc -c < \"$db\")" || return 1
   if have python3; then
@@ -928,7 +932,8 @@ cmd_geo_test() {
     reason="국가 ${country} 는 허용 목록 ${allowed} 에 없습니다"
   fi
   info "IP ${ip}"
-  info "country ${country:-<empty>}"
+  info "MaxMind 국가: ${country:-없음}"
+  info "VPN 앱이 보여주는 가상 위치와 다를 수 있습니다. 필터는 그 이름이 아니라 MaxMind 가 이 IP 에 부여한 국가로 판단합니다."
   info "allowed_countries ${allowed}"
   if [[ "$decision" == "ALLOW" ]]; then
     ok "decision ALLOW (${reason})"
