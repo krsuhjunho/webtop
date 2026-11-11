@@ -204,8 +204,8 @@ root 가 아니면 링크를 만들지 않고 sudo 예를 출력합니다. `link
 ./webtop.sh env --account 123 --license '키' --countries KR,JP
 ./webtop.sh ca
 ./webtop.sh server --cn webtop.example.com --extra www.webtop.example.com
-./webtop.sh client laptop --p12-pass '비밀번호'
-./webtop.sh client owner --admin --p12-pass '비밀번호'
+./webtop.sh client laptop
+./webtop.sh client owner --admin
 ./webtop.sh enroll --name phone --minutes 10
 ./webtop.sh list
 ./webtop.sh revoke laptop
@@ -227,7 +227,7 @@ root 가 아니면 링크를 만들지 않고 sudo 예를 출력합니다. `link
 ./webtop.sh link
 ./webtop.sh link
 ./webtop.sh cron-install --schedule '0 14 * * 1' --mode check
-./webtop.sh install --cn webtop.example.com --name laptop --p12-pass '비밀번호'
+./webtop.sh install --cn webtop.example.com --name laptop
 ```
 
 `install` 은 도구 확인, `.env`(포트 포함), 선택한 포트 점검, CA, 서버 인증서, 클라이언트 인증서, 스택 시작을 순서대로 하고, 이미 끝난 단계는 건너뜁니다. 443 이 다른 프로세스에 잡혀 있으면 HTTPS 기본값을 8443 으로 제안하고, 80 이 잡혀 있으면 HTTP 리다이렉트를 끌 수 있습니다. 값은 `HTTPS_PORT` 와 `HTTP_PORT`(비우면 HTTP 포트 없음)로 `deploy/.env` 에 저장됩니다. HTTP 를 켤 때만 `deploy/compose.http.yml` 이 함께 적용됩니다. Nginx 의 HTTP 리다이렉트는 443 이 아닐 때 `https://호스트:포트` 로 보냅니다.
@@ -299,7 +299,7 @@ mTLS 만으로 열고 싶으면 `FILEBROWSER_NOAUTH=true` 로 둔 뒤 `./webtop.
 
 `https://호스트/admin/` 은 클라이언트 인증서에 `OU=admin` 이 있거나 CN 이 `ADMIN_CNS` 에 있을 때만 열립니다. 메뉴의 관리자 인증서 발급 또는 `./webtop.sh client 이름 --admin` 으로 만듭니다. 그 페이지에서 인증서 목록, 발급, 폐기, 일회용 등록 링크를 처리합니다. 폐기하면 CRL 을 다시 쓰고 Nginx 가 잠시 후 다시 읽어 폐기된 인증서를 거부합니다. CA 개인키는 certadmin 컨테이너만 마운트합니다.
 
-`/enroll/<토큰>` 은 클라이언트 인증서 없이 열리지만, 국가 제한은 그대로입니다. 토큰은 256비트 난수이고 해시만 저장되며 기본 10분(`ENROLL_TTL_SECONDS`)입니다. PKCS#12 는 한 번만 발급되고 한 번만 내려받습니다. 루트 CA 파일은 그 토큰이 만료되기 전까지, PKCS#12 를 받은 뒤에도 같은 페이지에서 받을 수 있습니다. 페이지에 SHA-256 과 SHA-1 지문, 그리고 Windows, macOS, iOS, Android, Linux 설치 순서가 나옵니다. 자세한 절차는 [인증서 설치](docs/cert-install.md) 에 있습니다. `./webtop.sh enroll --name phone --minutes 10` 이 주소를 출력합니다. 발급, 폐기, 등록은 `deploy/logs/certadmin.log` 에 관리자 CN, IP, 국가가 남고 비밀번호와 토큰은 남지 않습니다.
+`/enroll/<토큰>` 은 클라이언트 인증서 없이 열리지만, 국가 제한은 그대로입니다. 첫 방문은 토큰을 `HttpOnly; Secure; SameSite=Strict` 쿠키로 옮기고 `/enroll/` 로 보냅니다. 토큰은 256비트 난수이고 해시만 저장됩니다. 기간을 생략하면 `ENROLL_TTL_SECONDS`(기본 600초, 10분)를 쓰고, 1분에서 1440분 사이로 맞춥니다. `./webtop.sh enroll --name phone --minutes 10` 처럼 분을 줄 수도 있습니다. PKCS#12 는 한 번만 발급되고 내려받는 즉시 메모리에서 지워집니다. 개인키 파일은 서버에 남기지 않습니다. 인증서 본문은 폐기를 위해 남습니다. 루트 CA 는 링크가 만료되기 전까지 같은 쿠키로 받을 수 있습니다. 페이지에 SHA-256 과 SHA-1 지문, 그리고 Windows, macOS, iOS, Android, Linux 설치 순서가 나옵니다. 자세한 절차는 [인증서 설치](docs/cert-install.md) 에 있습니다. 발급, 폐기, 등록은 `deploy/logs/certadmin.log` 에 관리자 CN, IP, 국가가 남고 비밀번호와 토큰은 남지 않습니다. Nginx 접속 로그의 `/enroll/` 과 일회용 다운로드 주소도 토큰 없이 기록합니다. 예전 `access.log` 에 토큰이 남아 있으면 그 파일을 지우고, `deploy/certs/clients/*.key` 와 `--keep` 없이 만들어 둔 `.p12` 도 기기로 옮긴 뒤 삭제하세요. 이 변경이 들어간 뒤 `self-update` 는 nginx 와 certadmin 을 다시 만듭니다.
 
 ## mTLS, GeoIP, Compose
 
@@ -340,16 +340,18 @@ VPN 앱이 보여주는 나라 이름과 MaxMind 가 그 출구 IP 에 붙인 �
 ./scripts/gen-certs.sh server --cn webtop.example.com \
   --san DNS:webtop.example.com,DNS:localhost,IP:127.0.0.1
 ./scripts/gen-certs.sh client laptop
+# 비밀번호를 지정하지 않으면 임의로 만들어 한 번만 출력합니다.
+# 서버에 PKCS#12 를 남기려면: ./scripts/gen-certs.sh client laptop --keep
 ```
 
 `deploy/certs/` 가 생깁니다.
 
 - `ca/ca.crt`, `ca/ca.key` — 개인 CA. 키는 서버에만 둡니다
 - `server/server.crt`, `server/server.key` — Nginx 서버 인증서
-- `clients/laptop.crt`, `laptop.key`, `laptop.p12` — 브라우저에 넣을 클라이언트 인증서
+- `clients/laptop.crt` — 폐기와 CRL 에 쓰는 클라이언트 인증서. 개인키와 `.p12` 는 기본으로 남기지 않습니다
 - `crl/ca.crl` — 폐기 목록
 
-PKCS#12 비밀번호 기본값은 `changeit` 입니다. `P12_PASS` 또는 `--p12-pass` 로 바꿉니다. 서버 인증서의 SAN 에 실제 접속 이름을 넣어야 브라우저가 이름을 맞춥니다.
+클라이언트 비밀번호는 대화형 프롬프트로 입력합니다. 비우면 임의 비밀번호를 한 번만 보여 줍니다. `--p12-pass` 와 `P12_PASS` 는 셸 기록이나 환경에 남으므로 스크립트 밖에서 쓰지 마세요. `--keep` 만 `clients/<이름>.p12` 를 0600 으로 서버에 남기고 경고합니다. 서버 인증서의 SAN 에 실제 접속 이름을 넣어야 브라우저가 이름을 맞춥니다.
 
 이름 제약은 새 CA 를 만들 때만 넣습니다. `--name-constraint` 는 반복할 수 있고, 도메인 또는 IP(단일 주소나 CIDR)를 받습니다. 도메인 제약은 그 이름과 하위 이름을 허용합니다. 제약은 CA 인증서의 critical nameConstraints 라서 나중에 고칠 수 없습니다. CA 를 바꾸면 서버 인증서와 모든 클라이언트 인증서를 다시 발급하고, 기기에 설치한 루트도 지운 뒤 다시 설치해야 합니다. 메뉴의 CA 생성에서도 같은 질문을 하며, 비우면 제약 없는 CA 가 만들어집니다.
 

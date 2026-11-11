@@ -5,7 +5,7 @@ set -eu
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 CERT_DIR=${CERT_DIR:-"$ROOT/deploy/certs"}
-P12_PASS=${P12_PASS:-changeit}
+P12_PASS=${P12_PASS:-}
 DAYS_CA=${DAYS_CA:-3650}
 DAYS_CERT=${DAYS_CERT:-825}
 
@@ -23,8 +23,12 @@ Commands:
                                nameConstraints. An existing CA is left as-is.
   server [--cn NAME] [--san LIST]
                                Issue the Nginx server certificate
-  client <name> [--admin] [--days N]
-                               Issue a client cert and <name>.p12
+  client <name> [--admin] [--days N] [--keep]
+                               Issue a client cert. The private key is not kept.
+                               Without --keep, the PKCS#12 is written to
+                               $CLIENT_P12_OUT (required) and the password is
+                               printed once. --keep stores clients/<name>.p12
+                               mode 0600 and leaves that copy on the server.
                                --admin sets OU=admin so Nginx allows /admin/
   revoke <name>                Revoke a client cert and regenerate the CRL
   crl                          Regenerate the CRL from the CA database
@@ -33,7 +37,9 @@ Options:
   --cn NAME                    Server common name (default webtop.local)
   --san LIST                   Comma-separated subjectAltName values
                                (default DNS:webtop.local,DNS:localhost,IP:127.0.0.1)
-  --p12-pass PASS              PKCS#12 password (default changeit, or $P12_PASS)
+  --p12-pass PASS              PKCS#12 password. Prefer a prompt or an empty
+                               P12_PASS so a random password is generated.
+                               --p12-pass is visible in shell history.
   --admin                      Mark the client certificate OU=admin
   --days N                     Certificate lifetime in days (default 825)
   --name-constraint NAME       Permitted DNS name or IP for a new CA.
@@ -348,11 +354,13 @@ cmd_client() {
   [ -n "$name" ] || { usage; exit 1; }
   shift || true
   admin=0
+  keep=0
   days=$DAYS_CERT
   while [ $# -gt 0 ]; do
     case $1 in
       --p12-pass) P12_PASS=$2; shift 2 ;;
       --admin) admin=1; shift ;;
+      --keep) keep=1; shift ;;
       --days) days=$2; shift 2 ;;
       *) echo "unknown option: $1" >&2; usage; exit 1 ;;
     esac
@@ -367,6 +375,8 @@ cmd_client() {
     exit 1
   fi
   ext=$(mktemp)
+  tmp_p12=""
+  trap 'rm -f "$ext" "$CERT_DIR/clients/${name}.csr" "$CERT_DIR/clients/${name}.key" ${tmp_p12:+"$tmp_p12"}' EXIT
   cat > "$ext" <<'EOF'
 [client_ext]
 basicConstraints = CA:FALSE
@@ -388,16 +398,35 @@ EOF
     -days "$days" \
     -extfile "$ext" -extensions client_ext
   pem_only "$CERT_DIR/clients/${name}.crt"
+  if [ -z "$P12_PASS" ]; then
+    P12_PASS=$(openssl rand -hex 16)
+  fi
+  export P12_PASS
+  tmp_p12=$(mktemp)
   openssl pkcs12 -export \
     -inkey "$CERT_DIR/clients/${name}.key" \
     -in "$CERT_DIR/clients/${name}.crt" \
     -certfile "$CERT_DIR/ca/ca.crt" \
     -name "$name" \
-    -out "$CERT_DIR/clients/${name}.p12" \
-    -passout "pass:${P12_PASS}"
-  rm -f "$ext" "$CERT_DIR/clients/${name}.csr"
-  chmod 600 "$CERT_DIR/clients/${name}.key" "$CERT_DIR/clients/${name}.p12"
-  echo "Wrote $CERT_DIR/clients/${name}.p12"
+    -out "$tmp_p12" \
+    -passout env:P12_PASS
+  rm -f "$ext" "$CERT_DIR/clients/${name}.csr" "$CERT_DIR/clients/${name}.key"
+  if [ "$keep" -eq 1 ]; then
+    mv "$tmp_p12" "$CERT_DIR/clients/${name}.p12"
+    chmod 600 "$CERT_DIR/clients/${name}.p12"
+    echo "WARNING: PKCS#12 private key remains on the server: $CERT_DIR/clients/${name}.p12" >&2
+    echo "Wrote $CERT_DIR/clients/${name}.p12"
+  else
+    [ -n "${CLIENT_P12_OUT:-}" ] || {
+      rm -f "$tmp_p12"
+      echo "CLIENT_P12_OUT is required unless --keep is set" >&2
+      exit 1
+    }
+    mv "$tmp_p12" "$CLIENT_P12_OUT"
+    chmod 600 "$CLIENT_P12_OUT"
+    echo "Wrote $CLIENT_P12_OUT"
+    echo "The server did not keep the private key. Move this file off the host and delete it." >&2
+  fi
   echo "PKCS#12 password: ${P12_PASS}"
 }
 
