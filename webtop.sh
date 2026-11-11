@@ -72,6 +72,7 @@ OPT_CN=""
 OPT_EXTRA=""
 OPT_NAME=""
 OPT_P12=""
+OPT_KEEP=0
 OPT_ACCOUNT=""
 OPT_LICENSE=""
 OPT_COUNTRIES=""
@@ -136,7 +137,7 @@ prompt() {
 prompt_secret() {
   local __name=$1 label=$2 value confirm
   if [[ "$NONINTERACTIVE" -eq 1 || ! -t 0 ]]; then
-    err "비밀번호는 대화형 모드에서만 묻습니다. --p12-pass 또는 P12_PASS 를 사용하세요."
+    err "비밀번호는 대화형으로 묻거나, 비우면 임의로 만들어 한 번만 보여 줍니다."
     return 1
   fi
   while true; do
@@ -164,7 +165,9 @@ usage() {
   ca [--name-constraint 이름]
                         CA 생성. 제약은 새 CA 에만 들어가며 반복할 수 있습니다
   server                서버 인증서 발급
-  client <이름> [--admin] 클라이언트 인증서 발급. --admin 이면 OU=admin
+  client <이름> [--admin] [--keep] 클라이언트 인증서 발급. --admin 이면 OU=admin
+                        비밀번호는 대화형으로 묻습니다. 비우면 임의로 만들어 한 번만 보여 줍니다.
+                        --keep 만 서버에 .p12 를 남깁니다
   enroll                일회용 등록 링크 출력 (--name, --minutes)
   list                  클라이언트 인증서 목록
   revoke <이름>         클라이언트 인증서 폐기 후 Nginx 리로드
@@ -204,7 +207,9 @@ usage() {
   --https-port N        외부 HTTPS 포트 (기본 443)
   --http-port N|none    HTTP 리다이렉트 포트. none 이면 끔
   --cn 도메인  --extra name,ip
-  --name 장치  --p12-pass 비밀번호  --admin  --minutes N
+  --name 장치  --admin  --minutes N  --keep
+                        PKCS#12 비밀번호는 프롬프트로 입력합니다.
+                        --p12-pass 는 셸 기록에 남으므로 쓰지 마세요.
   --name-constraint 도메인|IP
                         새 CA 가 서명할 수 있는 이름. 반복 가능
   --service webtop|nginx|geoipupdate|certadmin|filebrowser|all
@@ -978,9 +983,12 @@ cmd_client() {
   if [[ "$NONINTERACTIVE" -eq 1 ]]; then
     name=${OPT_NAME:-}
     pass=${OPT_P12:-${P12_PASS:-}}
-    if [[ -z "$name" || -z "$pass" ]]; then
-      err "이름과 비밀번호가 필요합니다. 예: ./webtop.sh client laptop --p12-pass '비밀번호'"
+    if [[ -z "$name" ]]; then
+      err "장치 이름이 필요합니다. 예: ./webtop.sh client laptop"
       return 1
+    fi
+    if [[ -z "$pass" ]]; then
+      info "비밀번호를 비워 두어 임의로 만듭니다. 한 번만 표시합니다."
     fi
   else
     name=$(prompt "장치 이름" "")
@@ -999,24 +1007,47 @@ cmd_client() {
     ok "클라이언트 인증서가 이미 있습니다: $(client_cert_path "$name")"
     return 0
   fi
-  local log rc
+  local log rc shown_pass p12_out p12_dir
   local -a extra_args=()
   if [[ "$OPT_ADMIN" -eq 1 || "$FORCE_ADMIN" -eq 1 ]]; then
     extra_args+=(--admin)
   fi
+  p12_out=""
+  if [[ "$OPT_KEEP" -eq 1 ]]; then
+    extra_args+=(--keep)
+  else
+    p12_dir=$(mktemp -d "${TMPDIR:-/tmp}/webtop-${name}.XXXXXX")
+    p12_out="${p12_dir}/${name}.p12"
+  fi
   log=$(mktemp)
-  P12_PASS="$pass" "$GEN_CERTS" client "$name" "${extra_args[@]}" >"$log" 2>&1
+  if [[ -n "$p12_out" ]]; then
+    CLIENT_P12_OUT="$p12_out" P12_PASS="$pass" "$GEN_CERTS" client "$name" "${extra_args[@]}" >"$log" 2>&1
+  else
+    P12_PASS="$pass" "$GEN_CERTS" client "$name" "${extra_args[@]}" >"$log" 2>&1
+  fi
   rc=$?
+  shown_pass=$(sed -n 's/^PKCS#12 password: //p' "$log" | tail -n 1)
   grep -v '^PKCS#12 password:' "$log" || true
   rm -f "$log"
   if [[ "$rc" -ne 0 ]]; then
+    if [[ -n "$p12_out" ]]; then
+      rm -rf "$(dirname "$p12_out")"
+    fi
     err "클라이언트 인증서 발급에 실패했습니다."
     return 1
   fi
   ok "발급했습니다."
   info "  인증서  ${CERT_DIR}/clients/${name}.crt"
-  info "  개인키  ${CERT_DIR}/clients/${name}.key"
-  info "  PKCS#12 ${CERT_DIR}/clients/${name}.p12"
+  if [[ "$OPT_KEEP" -eq 1 ]]; then
+    warn "개인키가 서버에 남습니다: ${CERT_DIR}/clients/${name}.p12"
+  else
+    info "  PKCS#12 ${p12_out}"
+    info "개인키 파일은 서버 인증서 보관함에 남기지 않았습니다. 기기로 옮긴 뒤 ${p12_out} 을 지우세요."
+  fi
+  if [[ -n "$shown_pass" ]]; then
+    info "PKCS#12 비밀번호는 이번 한 번만 표시합니다."
+    printf '%s\n' "$shown_pass"
+  fi
 }
 
 cmd_admin_client() {
@@ -1044,17 +1075,35 @@ access_base() {
   fi
 }
 
+enroll_default_minutes() {
+  local raw min
+  raw=$(env_get ENROLL_TTL_SECONDS)
+  raw=${raw:-600}
+  if [[ ! "$raw" =~ ^[0-9]+$ ]]; then
+    raw=600
+  fi
+  min=$((raw / 60))
+  if [[ "$min" -lt 1 ]]; then
+    min=1
+  fi
+  if [[ "$min" -gt 1440 ]]; then
+    min=1440
+  fi
+  printf '%s' "$min"
+}
+
 cmd_enroll() {
   local name minutes base running
+  local -a py
   require_env_file || return 1
   if [[ "$NONINTERACTIVE" -eq 1 ]]; then
     name=${OPT_NAME:-}
-    minutes=${OPT_MINUTES:-10}
+    minutes=${OPT_MINUTES:-}
   else
     name=$(prompt "장치 이름 (없으면 Enter)" "")
-    minutes=$(prompt "유효 시간(분)" "10")
+    minutes=$(prompt "유효 시간(분, 비우면 ENROLL_TTL_SECONDS)" "$(enroll_default_minutes)")
   fi
-  if [[ ! "$minutes" =~ ^[0-9]+$ ]]; then
+  if [[ -n "$minutes" && ! "$minutes" =~ ^[0-9]+$ ]]; then
     err "분은 숫자여야 합니다."
     return 1
   fi
@@ -1064,13 +1113,14 @@ cmd_enroll() {
     return 1
   fi
   base=$(access_base)
-  if [[ -n "$name" ]]; then
-    compose exec -T -e "PUBLIC_BASE_URL=${base}" certadmin \
-      python -u /app/certadmin.py enroll --minutes "$minutes" --name "$name"
-  else
-    compose exec -T -e "PUBLIC_BASE_URL=${base}" certadmin \
-      python -u /app/certadmin.py enroll --minutes "$minutes"
+  py=(python -u /app/certadmin.py enroll)
+  if [[ -n "$minutes" ]]; then
+    py+=(--minutes "$minutes")
   fi
+  if [[ -n "$name" ]]; then
+    py+=(--name "$name")
+  fi
+  compose exec -T -e "PUBLIC_BASE_URL=${base}" certadmin "${py[@]}"
 }
 
 cmd_list() {
@@ -3216,6 +3266,7 @@ parse_opts() {
       --name) OPT_NAME=$2; shift 2 ;;
       --name-constraint) OPT_CONSTRAINTS+=("$2"); shift 2 ;;
       --p12-pass) OPT_P12=$2; shift 2 ;;
+      --keep) OPT_KEEP=1; shift ;;
       --service) OPT_SERVICE=$2; shift 2 ;;
       --profile) OPT_PROFILE=$2; shift 2 ;;
       --variant) OPT_VARIANT=$2; shift 2 ;;

@@ -11,6 +11,7 @@ import re
 import secrets
 import subprocess
 import sys
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -31,7 +32,26 @@ LOCK_PATH = os.path.join(CERT_DIR, ".certadmin.lock")
 TOKEN_PATH = os.path.join(CERT_DIR, "enroll", "tokens.json")
 DUMMY_HASH = "0" * 64
 PENDING = {}
+STASH_LOCK = threading.Lock()
 FAILS = {}
+MIN_TTL_SECONDS = 60
+MAX_TTL_SECONDS = 1440 * 60
+
+
+def clamp_ttl_seconds(seconds):
+    try:
+        seconds = int(seconds)
+    except (TypeError, ValueError):
+        seconds = 600
+    if seconds < MIN_TTL_SECONDS:
+        return MIN_TTL_SECONDS
+    if seconds > MAX_TTL_SECONDS:
+        return MAX_TTL_SECONDS
+    return seconds
+
+
+def default_ttl_seconds():
+    return clamp_ttl_seconds(ENROLL_TTL)
 
 def now():
     return int(time.time())
@@ -163,6 +183,7 @@ def issue_cert(name, days, password, admin):
     if admin:
         subject = f"/CN={name}/OU=admin/O=Webtop"
     ext = os.path.join(CERT_DIR, f".{name}.ext")
+    signed = False
     with open(ext, "w", encoding="utf-8") as handle:
         handle.write(
             "[client_ext]\n"
@@ -207,6 +228,7 @@ def issue_cert(name, days, password, admin):
                 "client_ext",
             ]
         )
+        signed = True
         pem = subprocess.check_output(["openssl", "x509", "-in", crt])
         with open(crt, "wb") as handle:
             handle.write(pem)
@@ -229,10 +251,11 @@ def issue_cert(name, days, password, admin):
             env={**os.environ, "P12_PASS": password},
         )
     finally:
-        if os.path.exists(ext):
-            os.remove(ext)
-        if os.path.exists(csr):
-            os.remove(csr)
+        for path in (ext, csr, key):
+            if os.path.exists(path):
+                os.remove(path)
+        if not signed and os.path.exists(crt):
+            os.remove(crt)
     return p12, serial_of(name)
 
 
@@ -321,12 +344,29 @@ def revoke_name(name):
     return serial
 
 
+def _token_expiry(value):
+    try:
+        return int(value.get("expires", 0) or 0)
+    except (TypeError, ValueError, AttributeError):
+        return 0
+
+
 def load_tokens():
     if not os.path.isfile(TOKEN_PATH):
         return {}
     with open(TOKEN_PATH, encoding="utf-8") as handle:
         data = json.load(handle)
-    return data if isinstance(data, dict) else {}
+    if not isinstance(data, dict):
+        return {}
+    cutoff = now()
+    kept = {
+        key: value
+        for key, value in data.items()
+        if isinstance(value, dict) and _token_expiry(value) >= cutoff
+    }
+    if len(kept) != len(data):
+        save_tokens(kept)
+    return kept
 
 
 def save_tokens(data):
@@ -392,20 +432,19 @@ def public_base():
 
 def stash(payload, filename):
     item_id = secrets.token_urlsafe(24)
-    PENDING[item_id] = {"bytes": payload, "filename": filename, "expires": now() + 600}
+    with STASH_LOCK:
+        PENDING[item_id] = {"bytes": payload, "filename": filename, "expires": now() + 600}
     return item_id
 
 
 def take_stash(item_id):
-    item = PENDING.get(item_id)
-    if item is None:
-        hmac.compare_digest(item_id, "missing")
-        return None
-    if item["expires"] < now():
-        PENDING.pop(item_id, None)
-        return None
-    PENDING.pop(item_id, None)
-    return item
+    with STASH_LOCK:
+        item = PENDING.pop(item_id, None)
+        if item is None:
+            return None
+        if item["expires"] < now():
+            return None
+        return item
 
 
 def too_many_failures(ip):
@@ -538,6 +577,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("X-Content-Type-Options", "nosniff")
         if extra:
             for key, value in extra:
@@ -581,10 +621,16 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/admin/dl/"):
             self.download(path[len("/admin/dl/") :], admin=True)
             return
+        if not path.startswith("/enroll"):
+            self.reply(404, page("없음", "<p>없는 주소입니다.</p>"))
+            return
+        if not self.proxy_ok():
+            return
         if path.startswith("/enroll/dl/"):
-            if not self.proxy_ok():
-                return
             self.download(path[len("/enroll/dl/") :], admin=False)
+            return
+        if path in ("/enroll/ca.cer", "/enroll/ca.crt"):
+            self.send_ca(path.endswith(".cer"), admin=False, token=self.cookie("enroll_token"))
             return
         if path.startswith("/enroll/") and (path.endswith("/ca.cer") or path.endswith("/ca.crt")):
             suffix = "/ca.cer" if path.endswith("/ca.cer") else "/ca.crt"
@@ -592,10 +638,17 @@ class Handler(BaseHTTPRequestHandler):
             if token:
                 self.send_ca(suffix == "/ca.cer", admin=False, token=token)
                 return
+        if path in ("/enroll", "/enroll/"):
+            token = self.cookie("enroll_token")
+            if not token:
+                self.reply(404, page("없음", "<p>링크가 없습니다.</p>"))
+                return
+            self.enroll_page(token)
+            return
         if path.startswith("/enroll/"):
             token = path[len("/enroll/") :]
             if token and "/" not in token:
-                self.enroll_page(token)
+                self.redirect_enroll(token)
                 return
         self.reply(404, page("없음", "<p>없는 주소입니다.</p>"))
 
@@ -610,6 +663,15 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/admin/enroll":
             self.admin_enroll(form)
+            return
+        if path in ("/enroll", "/enroll/"):
+            if not self.proxy_ok():
+                return
+            token = self.cookie("enroll_token")
+            if not token:
+                self.reply(404, page("없음", "<p>링크가 없습니다.</p>"))
+                return
+            self.enroll_submit(token, form)
             return
         if path.startswith("/enroll/"):
             token = path[len("/enroll/") :]
@@ -650,7 +712,9 @@ class Handler(BaseHTTPRequestHandler):
             + "이름 <input name='name'><button>폐기</button></form>"
             + "<h2>등록 링크</h2><form method='post' action='/admin/enroll'>"
             + f"<input type='hidden' name='csrf' value='{esc(token)}'>"
-            + "이름(선택) <input name='name'> 분 <input name='minutes' value='10'>"
+            + "이름(선택) <input name='name'> 분 <input name='minutes' value='{}'>".format(
+                default_ttl_seconds() // 60
+            )
             + "<button>링크 만들기</button></form>"
         )
         self.reply(
@@ -721,16 +785,34 @@ class Handler(BaseHTTPRequestHandler):
         if name and not NAME_RE.match(name):
             self.reply(400, page("실패", "<p>이름이 올바르지 않습니다.</p>"))
             return
-        try:
-            minutes = int(form.get("minutes", "10"))
-        except ValueError:
-            minutes = 10
-        minutes = min(max(minutes, 1), 1440)
+        raw_minutes = (form.get("minutes") or "").strip()
+        if not raw_minutes:
+            ttl = default_ttl_seconds()
+        else:
+            try:
+                ttl = clamp_ttl_seconds(int(raw_minutes) * 60)
+            except ValueError:
+                ttl = default_ttl_seconds()
         with FileLock():
-            raw = create_token(name, minutes * 60)
+            raw = create_token(name, ttl)
         url = f"{public_base()}/enroll/{raw}"
         audit("enroll_create", name, "", "ok", self.client_ip(), self.country(), self.admin_cn())
         self.reply(200, page("등록 링크", f"<p>한 번만 유효합니다.</p><p><code>{esc(url)}</code></p>"))
+
+    def redirect_enroll(self, token):
+        _state, rec = enroll_state(token)
+        max_age = default_ttl_seconds()
+        if rec and rec.get("expires"):
+            max_age = max(1, int(rec["expires"]) - now())
+        self.reply(
+            302,
+            "",
+            "text/plain; charset=utf-8",
+            extra=[
+                ("Location", "/enroll/"),
+                ("Set-Cookie", enroll_cookie(token, max_age)),
+            ],
+        )
 
     def enroll_page(self, token):
         if not self.proxy_ok():
@@ -747,7 +829,7 @@ class Handler(BaseHTTPRequestHandler):
         if state == "expired":
             self.reply(410, page("만료", "<p>링크가 만료되었습니다.</p>"))
             return
-        prefix = f"/enroll/{token}/ca"
+        prefix = "/enroll/ca"
         guide_html = install_block(self.headers.get("User-Agent", ""))
         if state == "used":
             body = (
@@ -767,7 +849,7 @@ class Handler(BaseHTTPRequestHandler):
         )
         body = (
             ca_block(prefix)
-            + "<form method='post'>"
+            + "<form method='post' action='/enroll/'>"
             + f"<input type='hidden' name='csrf' value='{esc(csrf)}'>"
             + f"{field}<button>인증서 만들기</button></form>"
             + guide_html
@@ -811,7 +893,7 @@ class Handler(BaseHTTPRequestHandler):
         item = stash(p12, f"{name}.p12")
         audit("enroll_use", name, serial, "ok", ip, self.country(), "-")
         body = (
-            ca_block(f"/enroll/{token}/ca")
+            ca_block("/enroll/ca")
             + f"<p>비밀번호: <code>{esc(password)}</code></p>"
             + f"<p><a href='/enroll/dl/{esc(item)}'>PKCS#12 한 번 받기</a></p>"
             + "<p>PKCS#12 는 한 번만 받을 수 있습니다. CA 인증서는 이 링크가 만료되기 전까지 다시 받을 수 있습니다.</p>"
@@ -863,7 +945,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
         item = take_stash(item_id)
         if item is None:
-            self.reply(404, page("없음", "<p>다운로드가 없습니다.</p>"))
+            self.reply(410, page("만료", "<p>이미 받았거나 만료된 다운로드입니다.</p>"))
             return
         self.reply(
             200,
@@ -883,13 +965,24 @@ def serve():
     return 0
 
 
+def enroll_cookie(token, max_age):
+    max_age = max(1, int(max_age))
+    return (
+        f"enroll_token={token}; HttpOnly; Secure; SameSite=Strict; "
+        f"Path=/enroll; Max-Age={max_age}"
+    )
+
+
 def cli_enroll(name, minutes):
     if name and not NAME_RE.match(name):
         print("bad name", file=sys.stderr)
         return 1
-    minutes = min(max(minutes, 1), 1440)
+    if minutes is None:
+        ttl = default_ttl_seconds()
+    else:
+        ttl = clamp_ttl_seconds(minutes * 60)
     ensure_layout()
-    raw = create_token(name, minutes * 60)
+    raw = create_token(name, ttl)
     audit("enroll_create", name, "", "cli", "-", "-", "-")
     print(f"{public_base()}/enroll/{raw}")
     return 0
@@ -899,7 +992,7 @@ def main(argv):
     parser = argparse.ArgumentParser()
     parser.add_argument("command", choices=("serve", "enroll"))
     parser.add_argument("--name", default="")
-    parser.add_argument("--minutes", type=int, default=10)
+    parser.add_argument("--minutes", type=int, default=None)
     args = parser.parse_args(argv)
     if args.command == "serve":
         return serve()
