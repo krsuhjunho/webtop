@@ -10,8 +10,12 @@ if [ -r /etc/xdg/plasma-workspace/env/im.sh ]; then
   . /etc/xdg/plasma-workspace/env/im.sh
 fi
 
-if [ ! -f "$HOME/.config/kwinrc" ]; then
-  kwriteconfig6 --file "$HOME/.config/kwinrc" --group Compositing --key Enabled false
+if [ -x /usr/local/bin/webtop-tune ]; then
+  /usr/local/bin/webtop-tune wayland || true
+fi
+if [ "${WEBTOP_PROFILE:-low-power}" != "quality" ]; then
+  export KWIN_EFFECTS_FORCE_ANIMATIONS=0
+  export QSG_RENDER_LOOP=basic
 fi
 if [ ! -f "$HOME/.config/kscreenlockerrc" ]; then
   kwriteconfig6 --file "$HOME/.config/kscreenlockerrc" --group Daemon --key Autolock false
@@ -154,14 +158,20 @@ start_session() {
     fcitx5 -d --replace >/dev/null 2>&1 || true
   fi
 
-  pipewire &
-  for _ in $(seq 1 100); do
-    if [ -S "${XDG_RUNTIME_DIR}/pipewire-0" ]; then
-      break
-    fi
-    sleep 0.1
-  done
-  LD_PRELOAD= wireplumber &
+  audio_on=${SELKIES_AUDIO_ENABLED:-true}
+  case "${audio_on,,}" in
+    false|0|off|no) ;;
+    *)
+      pipewire &
+      for _ in $(seq 1 100); do
+        if [ -S "${XDG_RUNTIME_DIR}/pipewire-0" ]; then
+          break
+        fi
+        sleep 0.1
+      done
+      LD_PRELOAD='' wireplumber &
+      ;;
+  esac
   kcminit_startup || true
   kded6 &
   if [ "${PELORUS,,}" = "true" ]; then

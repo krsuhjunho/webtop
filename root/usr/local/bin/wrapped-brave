@@ -32,4 +32,23 @@ if [ "${PELORUS,,}" = "true" ]; then
   FLAGS+=(--force-renderer-accessibility)
 fi
 
+low_cpu=${WEBTOP_BRAVE_LOW_CPU:-}
+if [ -z "$low_cpu" ] && [ "${WEBTOP_PROFILE:-low-power}" = "low-power" ]; then
+  low_cpu=1
+fi
+case "${low_cpu,,}" in
+  1|true|yes|on)
+    # No GPU in this container. Skip GPU raster and compositing so the
+    # software renderer does less work on a 2 vCPU host.
+    FLAGS+=(
+      --disable-gpu
+      --disable-gpu-rasterization
+      --disable-gpu-compositing
+      --disable-accelerated-2d-canvas
+      --disable-accelerated-video-decode
+      --num-raster-threads=1
+    )
+    ;;
+esac
+
 exec "$BIN" "${FLAGS[@]}" "$@"

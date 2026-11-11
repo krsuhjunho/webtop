@@ -2,8 +2,8 @@
 # X11 fallback. This image sets PIXELFLUX_WAYLAND=true, so the normal path
 # is startwm_wayland.sh. Adapted from linuxserver/docker-webtop (GPL-3.0-only).
 
-if [ ! -f "$HOME/.config/kwinrc" ]; then
-  kwriteconfig6 --file "$HOME/.config/kwinrc" --group Compositing --key Enabled false
+if [ -x /usr/local/bin/webtop-tune ]; then
+  /usr/local/bin/webtop-tune x11 || true
 fi
 if [ ! -f "$HOME/.config/kscreenlockerrc" ]; then
   kwriteconfig6 --file "$HOME/.config/kscreenlockerrc" --group Daemon --key Autolock false

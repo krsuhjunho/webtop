@@ -42,6 +42,7 @@ OPT_HTTP=""
 OPT_SCHEDULE=""
 OPT_MODE=""
 OPT_CONSTRAINTS=()
+OPT_PROFILE=""
 
 if [[ -t 1 ]]; then
   C_RED=$'\033[1;31m'
@@ -134,6 +135,7 @@ usage() {
   access-log [종류]     access|certadmin|update. 메뉴에서는 따라가기
   geo-status            GeoIP DB, 허용 국가, Nginx 네트워크 모드
   geo-test <ip>         그 IP 를 Nginx 의 mmdb 로 조회하고 허용/거부를 출력
+  profile <이름>        low-power, balanced, quality. .env 를 고치고 webtop 을 다시 만듭니다
   update                새 버전이 있을 때만 이미지 업데이트
   check-update          업데이트 확인만
   auto-update           cron 용. UPDATE_MODE 에 따라 확인 또는 적용
@@ -155,6 +157,7 @@ usage() {
                         새 CA 가 서명할 수 있는 이름. 반복 가능
   --service webtop|nginx|geoipupdate|certadmin|all
   geo-test 의 IP 는 명령 뒤에 그대로 적습니다
+  --profile low-power|balanced|quality
   --yes                 업데이트 확인 질문을 생략
   --prune               적용 후 이전 dangling 이미지 삭제
   --schedule '0 6 * * 1'
@@ -1147,6 +1150,86 @@ show_all_logs() {
   return 0
 }
 
+apply_profile_env() {
+  local profile=$1
+  env_set WEBTOP_PROFILE "$profile" || return 1
+  case "$profile" in
+    low-power)
+      env_set SELKIES_ENCODER jpeg || return 1
+      env_set SELKIES_FRAMERATE 30 || return 1
+      env_set SELKIES_JPEG_QUALITY 55 || return 1
+      env_set SELKIES_VIDEO_CRF 32 || return 1
+      env_set SELKIES_USE_CPU true || return 1
+      env_set SELKIES_CPU_ENCODE_THREADING true || return 1
+      env_set SELKIES_VIDEO_STREAMING_MODE false || return 1
+      env_set SELKIES_USE_CSS_SCALING true || return 1
+      env_set SELKIES_SCALING_DPI 96 || return 1
+      env_set WEBTOP_BRAVE_LOW_CPU 1 || return 1
+      ;;
+    balanced)
+      env_set SELKIES_ENCODER h264enc || return 1
+      env_set SELKIES_FRAMERATE 30 || return 1
+      env_set SELKIES_JPEG_QUALITY 70 || return 1
+      env_set SELKIES_VIDEO_CRF 28 || return 1
+      env_set SELKIES_USE_CPU true || return 1
+      env_set SELKIES_CPU_ENCODE_THREADING true || return 1
+      env_set SELKIES_VIDEO_STREAMING_MODE false || return 1
+      env_set SELKIES_USE_CSS_SCALING false || return 1
+      env_set SELKIES_SCALING_DPI 96 || return 1
+      env_set WEBTOP_BRAVE_LOW_CPU 1 || return 1
+      ;;
+    quality)
+      env_set SELKIES_ENCODER h264enc || return 1
+      env_set SELKIES_FRAMERATE 60 || return 1
+      env_set SELKIES_JPEG_QUALITY 80 || return 1
+      env_set SELKIES_VIDEO_CRF 23 || return 1
+      env_set SELKIES_USE_CPU true || return 1
+      env_set SELKIES_CPU_ENCODE_THREADING true || return 1
+      env_set SELKIES_VIDEO_STREAMING_MODE false || return 1
+      env_set SELKIES_USE_CSS_SCALING false || return 1
+      env_set SELKIES_SCALING_DPI 120 || return 1
+      env_set WEBTOP_BRAVE_LOW_CPU 0 || return 1
+      ;;
+  esac
+  if [[ -z "$(env_get SELKIES_AUDIO_ENABLED)" ]]; then
+    env_set SELKIES_AUDIO_ENABLED true || return 1
+  fi
+}
+
+cmd_profile() {
+  local profile=${OPT_PROFILE:-${OPT_NAME:-}}
+  require_env_file || return 1
+  if [[ -z "$profile" ]]; then
+    if [[ "$NONINTERACTIVE" -eq 1 ]]; then
+      err "프로파일이 필요합니다. 예: ./webtop.sh profile low-power"
+      return 1
+    fi
+    info "현재 프로파일: $(env_get WEBTOP_PROFILE)"
+    profile=$(prompt "프로파일 (low-power/balanced/quality)" "low-power")
+  fi
+  case "$profile" in
+    low|low-power) profile="low-power" ;;
+    balanced|quality) ;;
+    *)
+      err "프로파일은 low-power, balanced, quality 중 하나여야 합니다."
+      return 1
+      ;;
+  esac
+  apply_profile_env "$profile" || return 1
+  ok "성능 프로파일을 ${profile} 로 저장했습니다."
+  info "  인코더=$(env_get SELKIES_ENCODER)  프레임=$(env_get SELKIES_FRAMERATE)  소리=$(env_get SELKIES_AUDIO_ENABLED)"
+  if ! have docker; then
+    warn "docker 가 없어 컨테이너는 다시 만들지 않았습니다."
+    return 0
+  fi
+  if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx webtop; then
+    info "webtop 컨테이너를 다시 만들어 환경 변수를 적용합니다."
+    compose up -d --no-deps --force-recreate webtop
+  else
+    info "webtop 이 꺼져 있습니다. 다음에 시작할 때 적용됩니다."
+  fi
+}
+
 cmd_logs() {
   local svc=${OPT_SERVICE:-}
   have docker || { err "docker 가 없습니다."; return 1; }
@@ -1669,6 +1752,7 @@ draw_menu() {
 19) 일회용 등록 링크
 20) GeoIP 상태
 21) GeoIP IP 시험
+22) 성능 프로파일
  0) 종료
 EOF
 }
@@ -1697,6 +1781,7 @@ menu_once() {
     19) cmd_enroll || true ;;
     20) cmd_geo_status || true ;;
     21) OPT_NAME=""; cmd_geo_test || true ;;
+    22) cmd_profile || true ;;
     0|q|Q|exit) return 10 ;;
     "") ;;
     *) err "없는 번호입니다: ${choice}" ;;
@@ -1749,6 +1834,7 @@ parse_opts() {
       --name-constraint) OPT_CONSTRAINTS+=("$2"); shift 2 ;;
       --p12-pass) OPT_P12=$2; shift 2 ;;
       --service) OPT_SERVICE=$2; shift 2 ;;
+      --profile) OPT_PROFILE=$2; shift 2 ;;
       -h|--help) usage; exit 0 ;;
       --) shift; break ;;
       -*)
@@ -1813,6 +1899,7 @@ main() {
     cron-remove) cmd_cron_remove ;;
     cron-status) cmd_cron_status ;;
     install) cmd_install ;;
+    profile) cmd_profile ;;
     *)
       err "알 수 없는 명령: ${cmd}"
       usage

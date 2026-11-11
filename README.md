@@ -63,6 +63,11 @@ docker run -d \
 | `XMODIFIERS` | `@im=fcitx` | XWayland 입력기 |
 | `SELKIES_ENABLE_CLIPBOARD` | `true` | `true`, `in`, `out`, `false` |
 | `SELKIES_CLIPBOARD_SEAMLESS` | `true` | 복사할 때마다 양방향 동기화 |
+| `WEBTOP_PROFILE` | `low-power` | `low-power`, `balanced`, `quality` |
+| `SELKIES_ENCODER` | `jpeg` | `jpeg` 또는 `h264enc` (소프트웨어 x264) |
+| `SELKIES_FRAMERATE` | `30` | 스트림 프레임 |
+| `SELKIES_AUDIO_ENABLED` | `true` | `false` 면 소리 캡처와 PipeWire 를 끕니다 |
+| `WEBTOP_BRAVE_LOW_CPU` | `1` | Brave GPU 래스터를 끕니다 |
 
 그 밖에 `SUBFOLDER`, `CUSTOM_PORT` 같은 Selkies/linuxserver 변수도 그대로 동작합니다.
 
@@ -116,6 +121,16 @@ Selkies 는 캡처용 컴포지터와 KWin 이 중첩이라, 자판에 없는 �
 사이드바의 클립보드 칸은 자동 동기화를 껐을 때의 수동 경로입니다.
 
 ## 관리 스크립트
+
+2 vCPU 호스트에서는 기본 프로파일이 `low-power` 입니다. 화면은 JPEG 로 초당 30프레임, KWin 효과와 Baloo, KDE Connect, Discover 알림은 꺼집니다. Brave 는 GPU 래스터를 쓰지 않습니다. 소리는 켜 두고, `SELKIES_AUDIO_ENABLED=false` 이면 세션이 PipeWire 를 띄우지 않습니다. `balanced` 는 소프트웨어 H.264(`h264enc`, 내부는 코어 수만큼 나뉜 x264) 30프레임, `quality` 는 같은 인코더로 60프레임입니다. 현재 Selkies 에는 x264 preset 을 따로 지정하는 변수가 없습니다.
+
+```bash
+./webtop.sh profile low-power
+./webtop.sh profile balanced
+./webtop.sh profile quality
+```
+
+프로파일은 `deploy/.env` 를 고치고, webtop 컨테이너가 켜져 있으면 그 컨테이너만 다시 만듭니다.
 
 루트의 `./webtop.sh` 가 배포에 필요한 일을 한곳에서 처리합니다. 인자 없이 실행하면 한국어 번호 메뉴가 반복되고, 작업을 마친 뒤 Enter 로 메뉴에 돌아옵니다. 같은 일을 명령으로도 실행할 수 있습니다. 메뉴의 로그 보기는 컨테이너 이름(`webtop`, `webtop-nginx`, `webtop-certadmin`, `webtop-geoipupdate`)으로 최근 100줄을 보여주고, 실행 중이면 Ctrl+C 할 때까지 따라갑니다. Ctrl+C 는 스크립트를 끝내지 않고 메뉴로 돌아옵니다. 컨테이너가 없으면 경로와 함께 오류를 냅니다. 접속 로그는 `deploy/logs/access.log` 를 시간, 국가, CN, 요청, 상태로 보여 주고, certadmin 감사 로그와 업데이트 로그도 고를 수 있습니다.
 
