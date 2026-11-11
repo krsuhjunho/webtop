@@ -218,6 +218,8 @@ root 가 아니면 링크를 만들지 않고 sudo 예를 출력합니다. `link
 ./webtop.sh self-update --check
 ./webtop.sh self-update --yes
 ./webtop.sh upgrade --stash --yes
+./webtop.sh login-check status
+./webtop.sh login-check install
 ./webtop.sh variant kasm
 ./webtop.sh update --yes
 ./webtop.sh link
@@ -229,6 +231,19 @@ root 가 아니면 링크를 만들지 않고 sudo 예를 출력합니다. `link
 `install` 은 도구 확인, `.env`(포트 포함), 선택한 포트 점검, CA, 서버 인증서, 클라이언트 인증서, 스택 시작을 순서대로 하고, 이미 끝난 단계는 건너뜁니다. 443 이 다른 프로세스에 잡혀 있으면 HTTPS 기본값을 8443 으로 제안하고, 80 이 잡혀 있으면 HTTP 리다이렉트를 끌 수 있습니다. 값은 `HTTPS_PORT` 와 `HTTP_PORT`(비우면 HTTP 포트 없음)로 `deploy/.env` 에 저장됩니다. HTTP 를 켤 때만 `deploy/compose.http.yml` 이 함께 적용됩니다. Nginx 의 HTTP 리다이렉트는 443 이 아닐 때 `https://호스트:포트` 로 보냅니다.
 
 `update` 와 `check-update` 는 이 머신의 아키텍처에 해당하는 선택 태그(`IMAGE_TAG`, 기본 `latest`, Kasm 은 `kasm`) 다이제스트를 실행 중인 컨테이너, 로컬 이미지와 비교합니다. 같으면 받지 않습니다. 다르면 맞는 날짜 태그(`yymmdd` 또는 `kasm-yymmdd`)를 보여주고, 확인 후 pull 합니다. `check-update` 는 저장소가 `origin/main` 보다 뒤처졌는지도 함께 보여 줍니다.
+
+대화형 SSH 로그인에서는 저장소나 이미지가 뒤처져 있을 때만 짧은 알림을 냅니다. 기본 `LOGIN_CHECK=prompt` 는 `업데이트를 지금 진행할까요? [Y/n]` 를 묻고, Enter 는 예입니다. 15초 안에 답이 없으면 넘어가고, 다음 확인 시각까지 다시 묻지 않습니다. 예이면 `self-update --yes` 와, 이미지가 뒤처졌으면 `update --yes` 를 이어서 실행합니다. `notify` 는 명령만 보여 주고, `off` 는 끄집니다. 확인 결과는 `deploy/logs/login-check.cache` 에 남고, 기본 6시간(`LOGIN_CHECK_INTERVAL`)이 지나면 다음 로그인에서 백그라운드로 다시 확인합니다. 로그인 셸을 기다리지 않습니다. 비대화형 셸과 scp, sftp 에는 아무것도 내지 않습니다. git 이나 docker 를 실행할 수 없으면 묻지 않고 알림만 냅니다.
+
+```bash
+git pull --ff-only
+sudo ./webtop.sh link
+./webtop.sh login-check status
+# root 가 아니면 계정 bashrc 에만 넣습니다.
+./webtop.sh login-check install
+./webtop.sh login-check uninstall
+```
+
+`sudo ./webtop.sh link` 는 `/usr/local/bin/webtop` 과 함께 `/etc/profile.d/webtop-update.sh` 를 넣습니다. 이미 링크만 있는 서버는 link 를 다시 실행하거나 `login-check install` 을 실행합니다.
 
 `self-update`(`upgrade` 와 같음)는 이 체크아웃을 `origin/main` 으로 fast-forward 합니다. `git fetch` 뒤 들어올 커밋을 보여주고, `git pull --ff-only` 만 합니다. 추적 중인 파일에 로컬 변경이 있으면 그 목록을 출력하고 멈추며, 버리지 않습니다. `--stash` 는 그 추적 파일만 `git stash` 하고, `deploy/.env`, `compose.override.yml`, 인증서, `filebrowser-data` 처럼 추적되지 않은 파일은 그대로 둡니다. 가져온 범위에서 Nginx 또는 certadmin 빌드 맥락이나 compose 파일이 바뀌었고 그 컨테이너가 있으면 해당 서비스만 다시 만듭니다. `webtop.sh` 가 바뀌면 새 스크립트를 다시 실행해 이어서 처리합니다. `--check` 는 적용하지 않습니다.
 
