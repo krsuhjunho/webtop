@@ -133,13 +133,15 @@ usage() {
   restart               스택 재시작
   status                상태
   logs [서비스]         컨테이너 로그. 없으면 all
-                        webtop|nginx|geoipupdate|certadmin|all
+                        webtop|nginx|geoipupdate|certadmin|filebrowser|all
   access                접속 로그 (access-log 와 같음)
   access-log [종류]     access|certadmin|update. 메뉴에서는 따라가기
   geo-status            GeoIP DB, 허용 국가, Nginx 네트워크 모드
   geo-test <ip>         그 IP 를 Nginx 의 mmdb 로 조회하고 허용/거부를 출력
   profile <이름>        low-power, balanced, quality. Selkies 전용
   variant [selkies|kasm] 데스크톱 변형. selkies 는 :latest, kasm 은 :kasm
+  filebrowser on|off|status|password
+                        선택 파일 브라우저. 기본은 끔
   update                선택한 태그에 새 버전이 있을 때만 이미지 업데이트
   check-update          업데이트 확인만
   auto-update           cron 용. UPDATE_MODE 에 따라 확인 또는 적용
@@ -159,7 +161,7 @@ usage() {
   --name 장치  --p12-pass 비밀번호  --admin  --minutes N
   --name-constraint 도메인|IP
                         새 CA 가 서명할 수 있는 이름. 반복 가능
-  --service webtop|nginx|geoipupdate|certadmin|all
+  --service webtop|nginx|geoipupdate|certadmin|filebrowser|all
   geo-test 의 IP 는 명령 뒤에 그대로 적습니다
   --profile low-power|balanced|quality
   --variant selkies|kasm  기본은 selkies (:latest). kasm 은 XFCE (:kasm)
@@ -194,8 +196,15 @@ stack_nginx_running() {
 
 compose() {
   local -a args
-  local http
+  local http with_fb=0
+  if [[ "${1:-}" == "--with-filebrowser" ]]; then
+    with_fb=1
+    shift
+  fi
   ensure_variant_env || return 1
+  apply_config_source
+  export FILEBROWSER_NOAUTH
+  FILEBROWSER_NOAUTH=$(filebrowser_noauth_value)
   args=(--env-file "$ENV_FILE" -f "$COMPOSE_FILE")
   http=$(env_get HTTP_PORT)
   if [[ -n "$http" ]]; then
@@ -205,6 +214,9 @@ compose() {
   # bind-mounted /config replaces the named volume.
   if [[ -f "$COMPOSE_OVERRIDE" ]]; then
     args+=(-f "$COMPOSE_OVERRIDE")
+  fi
+  if [[ "$with_fb" -eq 1 ]] || filebrowser_enabled; then
+    args+=(--profile filebrowser)
   fi
   docker compose "${args[@]}" "$@"
 }
@@ -466,6 +478,53 @@ warn_root_ids() {
 }
 
 # Interactive start offers to rewrite 0. Noninteractive start refuses.
+filebrowser_enabled() {
+  local value
+  value=$(env_get FILEBROWSER)
+  value=${value,,}
+  [[ "$value" == "on" || "$value" == "true" || "$value" == "1" || "$value" == "yes" ]]
+}
+
+filebrowser_noauth_value() {
+  local value
+  value=$(env_get FILEBROWSER_NOAUTH)
+  value=${value,,}
+  case "$value" in
+    1|true|yes|on) printf 'true' ;;
+    *) printf 'false' ;;
+  esac
+}
+
+apply_config_source() {
+  local configured bind
+  configured=$(env_get WEBTOP_CONFIG_SOURCE)
+  if [[ -n "$configured" ]]; then
+    export WEBTOP_CONFIG_SOURCE="$configured"
+    return 0
+  fi
+  if bind=$(config_bind_path); then
+    export WEBTOP_CONFIG_SOURCE="$bind"
+  fi
+}
+
+ensure_filebrowser_data_dir() {
+  local dir uid gid
+  dir="$ROOT/deploy/filebrowser-data"
+  uid=$(env_get PUID)
+  gid=$(env_get PGID)
+  uid=${uid:-1000}
+  gid=${gid:-1000}
+  if [[ "$uid" == "0" || "$gid" == "0" ]]; then
+    return 0
+  fi
+  mkdir -p "$dir/tmp"
+  if [[ "$(id -u)" -eq 0 ]]; then
+    chown -R "${uid}:${gid}" "$dir"
+  elif [[ "$(stat -c '%u' "$dir")" != "$uid" ]]; then
+    warn "deploy/filebrowser-data 소유자를 ${uid}:${gid} 로 맞추세요."
+  fi
+}
+
 offer_fix_root_ids() {
   local answer uid gid
   root_id_problem || return 0
@@ -1223,6 +1282,7 @@ service_container() {
     nginx) printf '%s' webtop-nginx ;;
     geoipupdate) printf '%s' webtop-geoipupdate ;;
     certadmin) printf '%s' webtop-certadmin ;;
+    filebrowser) printf '%s' webtop-filebrowser ;;
     *) return 1 ;;
   esac
 }
@@ -1307,7 +1367,7 @@ show_container_logs() {
 show_all_logs() {
   local svc name state found=0 running=0 spec
   local -a follow=()
-  for svc in webtop nginx geoipupdate certadmin; do
+  for svc in webtop nginx geoipupdate certadmin filebrowser; do
     name=$(service_container "$svc")
     inspect_container "$name"
     state=$?
@@ -1455,6 +1515,67 @@ cmd_variant() {
   fi
 }
 
+cmd_filebrowser() {
+  local action=${OPT_NAME:-} line
+  require_env_file || return 1
+  case "$action" in
+    on)
+      offer_fix_root_ids || return 1
+      env_set FILEBROWSER on || return 1
+      ensure_filebrowser_data_dir || return 1
+      ok "파일 브라우저를 켰습니다. 주소는 /files/ 입니다."
+      info "로그인은 켜 둡니다. 처음 비밀번호는 ./webtop.sh filebrowser password"
+      if ! have docker; then
+        warn "docker 가 없어 컨테이너는 시작하지 않았습니다."
+        return 0
+      fi
+      compose up -d --no-deps filebrowser
+      ;;
+    off)
+      env_set FILEBROWSER off || return 1
+      ok "파일 브라우저를 껐습니다. /files/ 는 502 입니다."
+      if ! have docker; then
+        return 0
+      fi
+      compose --with-filebrowser rm -sf filebrowser || true
+      ;;
+    status)
+      if filebrowser_enabled; then
+        info "설정: 켜짐"
+      else
+        info "설정: 꺼짐"
+      fi
+      info "자체 로그인 끄기(FILEBROWSER_NOAUTH)=$(filebrowser_noauth_value)"
+      apply_config_source
+      if [[ -n "${WEBTOP_CONFIG_SOURCE:-}" ]]; then
+        info "데이터 원본: ${WEBTOP_CONFIG_SOURCE}"
+      else
+        info "데이터 원본: webtop-config 볼륨"
+      fi
+      if have docker && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx webtop-filebrowser; then
+        docker ps -a --filter name=^webtop-filebrowser$ --format '컨테이너: {{.Status}}'
+      else
+        info "컨테이너: 없음"
+      fi
+      ;;
+    password)
+      have docker || { err "docker 가 없습니다."; return 1; }
+      line=$(docker logs webtop-filebrowser 2>&1 | grep -i 'initial admin password' | tail -n 1 || true)
+      if [[ -z "$line" ]]; then
+        err "로그에서 초기 관리자 비밀번호를 찾지 못했습니다."
+        err "컨테이너가 방금 켜졌으면 잠시 뒤 다시 실행하세요. 이미 바꾼 비밀번호는 로그에 없습니다."
+        return 1
+      fi
+      printf '%s\n' "$line"
+      info "아이디는 admin 입니다. 첫 로그인 때 비밀번호를 바꿉니다."
+      ;;
+    *)
+      err "사용법: ./webtop.sh filebrowser on|off|status|password"
+      return 1
+      ;;
+  esac
+}
+
 cmd_profile() {
   local profile=${OPT_PROFILE:-${OPT_NAME:-}}
   require_env_file || return 1
@@ -1506,10 +1627,10 @@ cmd_logs() {
     fi
   fi
   case "$svc" in
-    webtop|nginx|geoipupdate|certadmin) show_container_logs "$svc" ;;
+    webtop|nginx|geoipupdate|certadmin|filebrowser) show_container_logs "$svc" ;;
     all) show_all_logs ;;
     *)
-      err "서비스는 webtop, nginx, geoipupdate, certadmin, all 중 하나여야 합니다."
+      err "서비스는 webtop, nginx, geoipupdate, certadmin, filebrowser, all 중 하나여야 합니다."
       return 1
       ;;
   esac
@@ -2033,6 +2154,7 @@ draw_menu() {
 21) GeoIP IP 시험
 22) 성능 프로파일
 23) 데스크톱 변형
+24) 파일 브라우저
  0) 종료
 EOF
 }
@@ -2063,6 +2185,13 @@ menu_once() {
     21) OPT_NAME=""; cmd_geo_test || true ;;
     22) cmd_profile || true ;;
     23) OPT_VARIANT=""; OPT_NAME=""; cmd_variant || true ;;
+    24)
+      OPT_NAME=""
+      if [[ "$NONINTERACTIVE" -eq 0 ]]; then
+        OPT_NAME=$(prompt "파일 브라우저 (on/off/status/password)" "status")
+      fi
+      cmd_filebrowser || true
+      ;;
     0|q|Q|exit) return 10 ;;
     "") ;;
     *) err "없는 번호입니다: ${choice}" ;;
@@ -2183,6 +2312,7 @@ main() {
     install) cmd_install ;;
     profile) cmd_profile ;;
     variant) cmd_variant ;;
+    filebrowser) cmd_filebrowser ;;
     *)
       err "알 수 없는 명령: ${cmd}"
       usage

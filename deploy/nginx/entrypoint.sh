@@ -52,6 +52,11 @@ printf '%s' "$upstream" | grep -Eq '^[A-Za-z0-9._:-]+$' || {
   echo "WEBTOP_UPSTREAM is invalid: ${upstream}" >&2
   exit 1
 }
+filebrowser_upstream="${FILEBROWSER_UPSTREAM:-filebrowser:80}"
+printf '%s' "$filebrowser_upstream" | grep -Eq '^[A-Za-z0-9._:-]+$' || {
+  echo "FILEBROWSER_UPSTREAM is invalid: ${filebrowser_upstream}" >&2
+  exit 1
+}
 
 # Variable proxy_pass needs a resolver. Compose uses Docker's DNS.
 # Override NGINX_RESOLVER when the proxy is not on a compose network.
@@ -111,11 +116,12 @@ printf '%s' "$secret" | grep -Eq '^[A-Za-z0-9]{16,128}$' || {
 } > /etc/nginx/admin-cn.conf
 
 bytes=$(wc -c < "$DB" | tr -d ' ')
-echo "geoip fail-closed: allow=${countries} db=${DB} bytes=${bytes} http_port=${http_port:-disabled} upstream=${upstream}" >&2
+echo "geoip fail-closed: allow=${countries} db=${DB} bytes=${bytes} http_port=${http_port:-disabled} upstream=${upstream} filebrowser=${filebrowser_upstream}" >&2
 echo "geoip: empty or unknown country is denied. A VPN location name can differ from this database." >&2
 
 sed \
   -e "s#__WEBTOP_UPSTREAM__#${upstream}#g" \
+  -e "s#__FILEBROWSER_UPSTREAM__#${filebrowser_upstream}#g" \
   -e "s#__RESOLVER__#${resolver}#g" \
   -e "s#__HTTPS_REDIRECT__#${redir}#g" \
   -e "s#__CERTADMIN_SECRET__#${secret}#g" \

@@ -2,6 +2,7 @@ deploy/certs/
 deploy/logs/
 deploy/.env
 deploy/secrets/
+deploy/filebrowser-data/
 *.mmdb
 *.p12
 __pycache__/

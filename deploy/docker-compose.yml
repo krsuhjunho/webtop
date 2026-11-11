@@ -48,7 +48,8 @@ services:
       # Set false to skip Opus capture. PipeWire then stays down inside the session.
       SELKIES_AUDIO_ENABLED: ${SELKIES_AUDIO_ENABLED:-true}
     volumes:
-      - webtop-config:/config
+      # Named volume, or a host path from WEBTOP_CONFIG_SOURCE / compose.override.yml.
+      - ${WEBTOP_CONFIG_SOURCE:-webtop-config}:/config
       # Host Docker socket, optional. The image ships the CLI and compose plugin only.
       # - /var/run/docker.sock:/var/run/docker.sock
     networks:
@@ -101,6 +102,8 @@ services:
       CERTADMIN_PROXY_SECRET: ${CERTADMIN_PROXY_SECRET:?set CERTADMIN_PROXY_SECRET in deploy/.env}
       # KasmVNC and Selkies both publish the web client and websockets on 3000.
       WEBTOP_UPSTREAM: ${WEBTOP_UPSTREAM:-webtop:3000}
+      # Resolved at request time. /files/ is 502 while the profile is off.
+      FILEBROWSER_UPSTREAM: ${FILEBROWSER_UPSTREAM:-filebrowser:80}
       HTTPS_PORT: ${HTTPS_PORT:-443}
     ports:
       - "${HTTPS_PORT:-443}:443"
@@ -110,6 +113,25 @@ services:
       - ./certs/crl:/etc/nginx/mtls/crl:ro
       - ./logs:/var/log/nginx
       - webtop-geoip:/usr/share/GeoIP:ro
+    networks:
+      - webtop
+
+  # Optional. ./webtop.sh filebrowser on adds the compose profile.
+  # Slim image: no FFmpeg. arm64 and amd64. No host ports.
+  filebrowser:
+    profiles: ["filebrowser"]
+    image: ghcr.io/gtsteffaniak/filebrowser:2.0.2-stable-slim
+    container_name: webtop-filebrowser
+    restart: unless-stopped
+    user: "${PUID:-1000}:${PGID:-1000}"
+    environment:
+      TZ: ${TZ:-Asia/Tokyo}
+      # true or false. true disables the FileBrowser login. mTLS remains.
+      FILEBROWSER_NOAUTH: ${FILEBROWSER_NOAUTH:-false}
+    volumes:
+      - ${WEBTOP_CONFIG_SOURCE:-webtop-config}:/srv
+      - ./filebrowser-data:/home/filebrowser/data
+      - ./filebrowser/config.yaml:/home/filebrowser/data/config.yaml:ro
     networks:
       - webtop
 

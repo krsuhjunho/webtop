@@ -227,6 +227,35 @@ services:
       - /docker/shark.ikenew.top/data:/config
 ```
 
+## 파일 브라우저
+
+선택 사항입니다. 기본은 꺼져 있습니다. [FileBrowser Quantum](https://github.com/gtsteffaniak/filebrowser) `ghcr.io/gtsteffaniak/filebrowser:2.0.2-stable-slim` 을 씁니다. amd64 와 arm64 이고, FFmpeg 가 없는 slim 이라 용량이 작습니다. 호스트 포트는 없습니다. Nginx 의 `/files/` 로만 들어가고, 데스크톱과 같은 mTLS 와 GeoIP 를 탑니다.
+
+```bash
+./webtop.sh filebrowser on
+./webtop.sh filebrowser off
+./webtop.sh filebrowser status
+./webtop.sh filebrowser password
+```
+
+`on` 은 `deploy/.env` 의 `FILEBROWSER=on` 을 저장하고 compose profile `filebrowser` 로 컨테이너를 띄웁니다. 이후 `start`, `restart`, `update` 도 그 프로필을 포함합니다. `off` 는 설정을 끄고 컨테이너를 지웁니다. 꺼져 있으면 Nginx 는 그대로 뜨고 `/files/` 는 502 입니다.
+
+보는 디렉터리는 webtop 의 `/config` 와 같습니다. `WEBTOP_CONFIG_SOURCE` 에 호스트 경로를 두면 두 서비스가 그 경로를 같이 씁니다. 비어 있고 `deploy/compose.override.yml` 이 `/config` 에 디렉터리를 붙이면 그 경로를 같이 씁니다. 예:
+
+```bash
+WEBTOP_CONFIG_SOURCE=/docker/shark.ikenew.top/data
+```
+
+데이터베이스는 `deploy/filebrowser-data/` 에 있으며 커밋하지 않습니다. 프로세스는 `PUID`/`PGID` (기본 1000, 0 은 거부) 로 돕니다.
+
+로그인은 켜 둡니다. 비밀번호는 설정 파일에 넣지 않습니다. 첫 실행이 `admin` 의 임의 비밀번호를 로그에 한 번 남기고, 첫 로그인 때 바꾸라고 합니다.
+
+```bash
+./webtop.sh filebrowser password
+```
+
+mTLS 만으로 열고 싶으면 `FILEBROWSER_NOAUTH=true` 로 둔 뒤 `./webtop.sh filebrowser on` 으로 다시 만듭니다. 클라이언트 인증서는 그대로 필요합니다. 프록시 헤더로 사용자를 넘기는 기능은 켜지 않습니다. FileBrowser 는 인터넷에 직접 열리지 않습니다.
+
 영상과 소리의 기본 프로그램은 두 변형 모두 VLC 입니다. `/etc/xdg/mimeapps.list` 와 `/usr/share/applications/mimeapps.list` 에 두고, 컨테이너가 시작할 때마다 `/config/.config/mimeapps.list` 의 영상/소리 항목만 `vlc.desktop` 으로 고칩니다. 다른 타입과 사용자가 적어 둔 나머지 연결은 그대로입니다. `kde-mimeapps.list` 가 있으면 같은 항목만 고칩니다.
 
 `https://호스트/admin/` 은 클라이언트 인증서에 `OU=admin` 이 있거나 CN 이 `ADMIN_CNS` 에 있을 때만 열립니다. 메뉴의 관리자 인증서 발급 또는 `./webtop.sh client 이름 --admin` 으로 만듭니다. 그 페이지에서 인증서 목록, 발급, 폐기, 일회용 등록 링크를 처리합니다. 폐기하면 CRL 을 다시 쓰고 Nginx 가 잠시 후 다시 읽어 폐기된 인증서를 거부합니다. CA 개인키는 certadmin 컨테이너만 마운트합니다.

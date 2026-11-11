@@ -1,0 +1,24 @@
+# FileBrowser Quantum v2. No secrets in this file.
+# The first start logs a random admin password. ./webtop.sh filebrowser password
+# prints that line. FILEBROWSER_NOAUTH=true turns login off; mTLS still applies.
+http:
+  port: 80
+  baseURL: "/files"
+  trustProxyHeaders: true
+
+server:
+  cacheDir: /home/filebrowser/data/tmp
+  database:
+    path: /home/filebrowser/data/database.sqlite
+  sources:
+    - path: /srv
+      name: webtop
+      config:
+        defaultEnabled: true
+
+auth:
+  methods:
+    noauth: ${FILEBROWSER_NOAUTH}
+    password:
+      enabled: true
+      signup: false
