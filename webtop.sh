@@ -8,10 +8,10 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 ENV_EXAMPLE="$ROOT/deploy/.env.example"
 ENV_FILE="$ROOT/deploy/.env"
 COMPOSE_FILE="$ROOT/deploy/docker-compose.yml"
+COMPOSE_HTTP="$ROOT/deploy/compose.http.yml"
 CERT_DIR="$ROOT/deploy/certs"
 GEN_CERTS="$ROOT/scripts/gen-certs.sh"
 ACCESS_LOG="$ROOT/deploy/logs/access.log"
-COMPOSE_HTTP="$ROOT/deploy/compose.http.yml"
 UPDATE_LOG="$ROOT/deploy/logs/update.log"
 UPDATE_LOCK="$ROOT/deploy/logs/update.lock"
 IMAGE_REF="ghcr.io/krsuhjunho/webtop:latest"
@@ -126,6 +126,8 @@ usage() {
   status                상태
   logs <서비스>         로그 (비대화형이면 최근 100줄)
   access                접속 로그
+  geo-status            GeoIP DB, 허용 국가, Nginx 네트워크 모드
+  geo-test <ip>         그 IP 를 Nginx 의 mmdb 로 조회하고 허용/거부를 출력
   update                새 버전이 있을 때만 이미지 업데이트
   check-update          업데이트 확인만
   auto-update           cron 용. UPDATE_MODE 에 따라 확인 또는 적용
@@ -144,6 +146,7 @@ usage() {
   --cn 도메인  --extra name,ip
   --name 장치  --p12-pass 비밀번호  --admin  --minutes N
   --service webtop|nginx|geoipupdate|certadmin
+  geo-test 의 IP 는 명령 뒤에 그대로 적습니다
   --yes                 업데이트 확인 질문을 생략
   --prune               적용 후 이전 dangling 이미지 삭제
   --schedule '0 6 * * 1'
@@ -823,6 +826,123 @@ cmd_status() {
   compose ps
 }
 
+ipv4_private() {
+  awk -v ip="$1" 'BEGIN {
+    n = split(ip, o, ".")
+    if (n != 4) exit 1
+    for (i = 1; i <= 4; i++) if (o[i] !~ /^[0-9]+$/ || o[i] > 255) exit 1
+    v = o[1] * 16777216 + o[2] * 65536 + o[3] * 256 + o[4]
+    if (o[1] == 0 || o[1] == 10 || o[1] == 127) exit 0
+    if (o[1] == 169 && o[2] == 254) exit 0
+    if (o[1] == 172 && o[2] >= 16 && o[2] <= 31) exit 0
+    if (o[1] == 192 && o[2] == 168) exit 0
+    exit 1
+  }'
+}
+
+ip_is_private() {
+  local ip=$1
+  if [[ "$ip" == *:* ]]; then
+    local low=${ip,,}
+    [[ "$low" == "::1" || "$low" == fc* || "$low" == fd* || "$low" == fe80:* ]]
+    return $?
+  fi
+  ipv4_private "$ip"
+}
+
+valid_ip() {
+  [[ "$1" =~ ^[0-9A-Fa-f:.]+$ ]]
+}
+
+nginx_container() {
+  docker inspect -f '{{.State.Running}}' webtop-nginx >/dev/null 2>&1
+}
+
+cmd_geo_status() {
+  have docker || { err "docker 가 없습니다."; return 1; }
+  if ! nginx_container; then
+    err "webtop-nginx 가 실행 중이 아닙니다. 스택을 시작한 뒤 다시 보세요."
+    return 1
+  fi
+  local mode allowed db
+  mode=$(docker inspect -f '{{.HostConfig.NetworkMode}}' webtop-nginx)
+  allowed=$(docker exec webtop-nginx printenv ALLOWED_COUNTRIES 2>/dev/null || true)
+  db=$(docker exec webtop-nginx printenv GEOIP_DB 2>/dev/null || true)
+  db=${db:-/usr/share/GeoIP/GeoLite2-Country.mmdb}
+  info "네트워크 모드: ${mode}"
+  info "허용 국가: ${allowed:-KR,JP}"
+  info "판정은 access.log 의 client= 주소에 MaxMind 가 붙인 국가입니다. VPN 앱의 가상 위치 이름과 다를 수 있습니다."
+  info "DB: ${db}"
+  docker exec webtop-nginx sh -c "ls -l \"$db\"; echo size=\$(wc -c < \"$db\")" || return 1
+  if have python3; then
+    docker exec webtop-nginx cat "$db" | python3 "$ROOT/scripts/mmdb-meta.py" || true
+  else
+    warn "python3 가 없어 DB 빌드 시각은 생략합니다."
+  fi
+  if docker inspect webtop-geoipupdate >/dev/null 2>&1; then
+    info "geoipupdate 최근 로그:"
+    docker logs --tail 15 webtop-geoipupdate 2>&1 || true
+  else
+    warn "webtop-geoipupdate 컨테이너가 없습니다."
+  fi
+  local stream="$ROOT/deploy/logs/stream.log"
+  if [[ -r "$stream" ]]; then
+    info "최근 거부 (stream.log allowed=0):"
+    grep 'allowed=0' "$stream" | tail -n 10 || info "  없음"
+  else
+    warn "stream 로그를 읽을 수 없습니다: ${stream}"
+  fi
+}
+
+cmd_geo_test() {
+  local ip=${OPT_NAME:-}
+  have docker || { err "docker 가 없습니다."; return 1; }
+  if [[ -z "$ip" ]]; then
+    if [[ "$NONINTERACTIVE" -eq 1 ]]; then
+      err "IP 가 필요합니다. 예: ./webtop.sh geo-test 175.139.0.1"
+      return 1
+    fi
+    ip=$(prompt "검사할 IP" "")
+  fi
+  if ! valid_ip "$ip"; then
+    err "IP 형식이 올바르지 않습니다: ${ip}"
+    return 1
+  fi
+  if ! nginx_container; then
+    err "webtop-nginx 가 실행 중이 아닙니다."
+    return 1
+  fi
+  local allowed raw country decision reason
+  allowed=$(docker exec webtop-nginx printenv ALLOWED_COUNTRIES 2>/dev/null || echo "KR,JP")
+  allowed=${allowed:-KR,JP}
+  raw=$(docker exec webtop-nginx mmdblookup --file /usr/share/GeoIP/GeoLite2-Country.mmdb --ip "$ip" country iso_code 2>&1) || true
+  country=$(printf '%s\n' "$raw" | sed -n 's/.*"\([A-Za-z][A-Za-z]\)".*/\1/p' | head -n 1)
+  country=$(printf '%s' "$country" | tr '[:lower:]' '[:upper:]')
+  if ip_is_private "$ip"; then
+    decision=ALLOW
+    reason="사설/루프백/링크로컬 대역"
+  elif [[ -z "$country" ]]; then
+    decision=DROP
+    reason="DB에 국가가 없습니다. 알 수 없는 주소는 거부합니다."
+  elif printf ',%s,' "$allowed" | tr '[:lower:]' '[:upper:]' | grep -q ",${country},"; then
+    decision=ALLOW
+    reason="허용 목록 ${allowed}"
+  else
+    decision=DROP
+    reason="국가 ${country} 는 허용 목록 ${allowed} 에 없습니다"
+  fi
+  info "IP ${ip}"
+  info "MaxMind 국가: ${country:-없음}"
+  info "VPN 앱이 보여주는 가상 위치와 다를 수 있습니다. 필터는 그 이름이 아니라 MaxMind 가 이 IP 에 부여한 국가로 판단합니다."
+  info "allowed_countries ${allowed}"
+  if [[ "$decision" == "ALLOW" ]]; then
+    ok "decision ALLOW (${reason})"
+  else
+    err "decision DROP (${reason})"
+  fi
+  [[ "$decision" == "ALLOW" ]]
+}
+
 cmd_logs() {
   local svc=${OPT_SERVICE:-}
   if [[ -z "$svc" ]]; then
@@ -1253,6 +1373,8 @@ draw_menu() {
 17) 주간 자동 확인
 18) 관리자 인증서 발급
 19) 일회용 등록 링크
+20) GeoIP 상태
+21) GeoIP IP 시험
  0) 종료
 EOF
 }
@@ -1279,6 +1401,8 @@ menu_once() {
     17) cmd_cron_menu || true ;;
     18) cmd_admin_client || true ;;
     19) cmd_enroll || true ;;
+    20) cmd_geo_status || true ;;
+    21) OPT_NAME=""; cmd_geo_test || true ;;
     0|q|Q|exit) return 10 ;;
     "") ;;
     *) err "없는 번호입니다: ${choice}" ;;
@@ -1384,6 +1508,8 @@ main() {
       cmd_logs
       ;;
     access) cmd_access ;;
+    geo-status) cmd_geo_status ;;
+    geo-test) cmd_geo_test ;;
     update|pull) cmd_update ;;
     check-update) cmd_check_update ;;
     auto-update) cmd_auto_update ;;

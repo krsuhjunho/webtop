@@ -15,10 +15,22 @@ while [ ! -s "$DB" ]; do
   sleep 1
 done
 
+# Exit 6 means the IP is absent. That is a readable database.
+# set -e would otherwise abort on that lookup. Any other failure refuses to start.
+mmdb_rc=0
+mmdblookup --file "$DB" --ip 127.0.0.1 >/tmp/mmdblookup.out 2>&1 || mmdb_rc=$?
+if [ "$mmdb_rc" -ne 0 ] && [ "$mmdb_rc" -ne 6 ]; then
+  cat /tmp/mmdblookup.out >&2
+  echo "GeoLite2 database is not readable: ${DB}" >&2
+  exit 1
+fi
+
 countries="${ALLOWED_COUNTRIES:-KR,JP}"
 {
   echo "map \$geoip2_country_code \$country_allowed {"
   echo "    default 0;"
+  echo "    \"\" 0;"
+  echo "    \"-\" 0;"
   # shellcheck disable=SC2086
   oldifs=$IFS
   IFS=', '
@@ -50,6 +62,23 @@ printf '%s' "$https_port" | grep -Eq '^[0-9]+$' || {
   echo "HTTPS_PORT is invalid: ${https_port}" >&2
   exit 1
 }
+if [ "$https_port" -lt 1 ] || [ "$https_port" -gt 65535 ]; then
+  echo "HTTPS_PORT is out of range: ${https_port}" >&2
+  exit 1
+fi
+
+http_port="${HTTP_PORT:-}"
+if [ -n "$http_port" ]; then
+  printf '%s' "$http_port" | grep -Eq '^[0-9]+$' || {
+    echo "HTTP_PORT is invalid: ${http_port}" >&2
+    exit 1
+  }
+  if [ "$http_port" = "$https_port" ]; then
+    echo "HTTP_PORT and HTTPS_PORT must differ" >&2
+    exit 1
+  fi
+fi
+
 if [ "$https_port" = "443" ]; then
   # shellcheck disable=SC2016 # nginx sees $host, not the shell.
   redir='return 301 https://$host$request_uri;'
@@ -81,12 +110,26 @@ printf '%s' "$secret" | grep -Eq '^[A-Za-z0-9]{16,128}$' || {
   echo "}"
 } > /etc/nginx/admin-cn.conf
 
+bytes=$(wc -c < "$DB" | tr -d ' ')
+echo "geoip fail-closed: allow=${countries} db=${DB} bytes=${bytes} http_port=${http_port:-disabled}" >&2
+echo "geoip: empty or unknown country is denied. A VPN location name can differ from this database." >&2
+
 sed \
   -e "s#__WEBTOP_UPSTREAM__#${upstream}#g" \
   -e "s#__RESOLVER__#${resolver}#g" \
   -e "s#__HTTPS_REDIRECT__#${redir}#g" \
   -e "s#__CERTADMIN_SECRET__#${secret}#g" \
+  -e "s#__HTTP_PORT__#${http_port:-80}#g" \
   /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf
+
+if [ -z "$http_port" ]; then
+  sed -i '/# HTTP_SERVER_BEGIN/,/# HTTP_SERVER_END/d' /etc/nginx/nginx.conf
+fi
+
+nginx -t >/tmp/nginx-t.err 2>&1 || {
+  cat /tmp/nginx-t.err >&2
+  exit 1
+}
 
 watch_crl() {
   last=0

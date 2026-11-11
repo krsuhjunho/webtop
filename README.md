@@ -165,7 +165,14 @@ cp deploy/.env.example deploy/.env
 
 `deploy/.env` 와 mmdb 파일은 커밋하지 않습니다. `geoipupdate` 가 `GeoLite2-Country` 를 받아 이름 있는 볼륨에 넣고, 기본 72시간마다 다시 받습니다. Nginx 모듈은 5분 간격으로 파일 변경을 확인해 다시 읽습니다.
 
-허용 국가는 `ALLOWED_COUNTRIES` (기본 `KR,JP`) 입니다. 사설/루프백/링크로컬 주소는 항상 허용합니다. 그 외 공인 IP 는 **TLS 핸드셰이크 전에** stream 계층에서 연결을 끊습니다. 국가 코드는 stream 로그와 HTTP 접근 로그에 남습니다.
+허용 국가는 `ALLOWED_COUNTRIES` (기본 `KR,JP`) 입니다. 사설/루프백/링크로컬 주소는 항상 허용합니다. 그 외 공인 IP 는 **TLS 핸드셰이크 전에** stream 계층에서 연결을 끊습니다. DB 에 국가가 없으면 거부합니다. mmdb 가 없거나 깨져 있으면 Nginx 는 시작하지 않습니다. 국가와 클라이언트 IP 는 `deploy/logs/stream.log` (`allowed=0` 이 거부)와 `access.log` 에 남습니다.
+
+VPN 앱이 보여주는 나라 이름과 MaxMind 가 그 출구 IP 에 붙인 나라는 다를 수 있습니다. `access.log` 가 `client=130.62.218.125 country="JP"` 이면 필터는 그 주소를 일본으로 본 것입니다.
+
+```bash
+./webtop.sh geo-status
+./webtop.sh geo-test 130.62.218.125
+```
 
 같은 IP 의 동시 연결은 stream 에서 30개로 제한합니다. TLS 이후 요청은 IP 당 초당 30회(버스트 200), 동시 30연결입니다. 페이지가 429 로 잘리면 `deploy/nginx/nginx.conf` 의 `limit_req` / `limit_conn` 을 올리세요.
 
@@ -255,5 +262,5 @@ GitHub Actions 는 amd64 를 `ubuntu-24.04`, arm64 를 `ubuntu-24.04-arm` 에서
 
 - 화면이 검으면 `--shm-size=2g` 를 확인합니다. WebSocket 이 프록시에서 막혀도 같습니다. Nginx 는 버퍼링을 끄고 타임아웃을 1시간으로 둡니다.
 - 시계가 UTC 이면 `TZ=Asia/Tokyo` 인지, 볼륨에 남은 사용자 시간대 설정이 없는지 확인합니다. 컨테이너 안에서 `date` 가 JST 여야 합니다.
-- 국가 제한에 걸리면 인증서 선택 창도 뜨기 전에 연결이 끊깁니다. 집/회사 공인 IP 가 한국 또는 일본인지 확인하세요. 사설 IP 에서 붙는 관리 접속은 허용됩니다. mmdb 가 없으면 Nginx 는 기동하지 않습니다 (막힌 상태가 기본).
+- 국가 제한에 걸리면 인증서 선택 창도 뜨기 전에 연결이 끊깁니다. `./webtop.sh geo-test <공인IP>` 가 MaxMind 국가를 보여 줍니다. VPN 의 가상 위치와 다를 수 있습니다. 사설 IP 에서 붙는 관리 접속은 허용됩니다. mmdb 가 없으면 Nginx 는 기동하지 않습니다 (막힌 상태가 기본).
 - GeoIP 데이터베이스가 오래되면 `geoipupdate` 로그를 봅니다. 라이선스 키는 `deploy/.env` 에만 있습니다.
