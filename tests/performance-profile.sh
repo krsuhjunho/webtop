@@ -14,23 +14,23 @@ export HOME="$tmp/home"
 export WEBTOP_PROFILE=low-power
 mkdir -p "$HOME/.config"
 PATH="$tmp:$PATH" bash "$ROOT/root/usr/local/bin/webtop-tune" wayland
-grep -q 'kdeglobals KDE AnimationDurationFactor 0' "$STUB_LOG"
-grep -q 'kwinrc Plugins blurEnabled false' "$STUB_LOG"
-grep -q 'kwinrc Compositing Enabled true' "$STUB_LOG"
-grep -q 'baloofilerc Basic Settings Indexing-Enabled false' "$STUB_LOG"
+grep -q -- '--file kdeglobals --group KDE --key AnimationDurationFactor 0' "$STUB_LOG"
+grep -q -- '--file kwinrc --group Plugins --key blurEnabled false' "$STUB_LOG"
+grep -q -- '--file kwinrc --group Compositing --key Enabled true' "$STUB_LOG"
+grep -q -- '--file baloofilerc --group Basic Settings --key Indexing-Enabled false' "$STUB_LOG"
 test -f "$HOME/.config/autostart/org.kde.kdeconnect.daemon.desktop"
 grep -q 'Hidden=true' "$HOME/.config/autostart/org.kde.kdeconnect.daemon.desktop"
 
 export STUB_LOG="$tmp/x11.log"
 export WEBTOP_PROFILE=low-power
 PATH="$tmp:$PATH" bash "$ROOT/root/usr/local/bin/webtop-tune" x11
-grep -q 'kwinrc Compositing Enabled false' "$STUB_LOG"
+grep -q -- '--file kwinrc --group Compositing --key Enabled false' "$STUB_LOG"
 
 export STUB_LOG="$tmp/quality.log"
 export WEBTOP_PROFILE=quality
 PATH="$tmp:$PATH" bash "$ROOT/root/usr/local/bin/webtop-tune" wayland
-grep -q 'kdeglobals KDE AnimationDurationFactor 0.5' "$STUB_LOG"
-grep -q 'kwinrc Plugins blurEnabled true' "$STUB_LOG"
+grep -q -- '--file kdeglobals --group KDE --key AnimationDurationFactor 0.5' "$STUB_LOG"
+grep -q -- '--file kwinrc --group Plugins --key blurEnabled true' "$STUB_LOG"
 
 envfile="$ROOT/deploy/.env"
 backup=""
