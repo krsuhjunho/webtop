@@ -14,7 +14,9 @@ COPY entrypoint.sh /entrypoint.sh
 RUN chmod 755 /entrypoint.sh
 
 ENV ALLOWED_COUNTRIES=KR,JP \
-    WEBTOP_UPSTREAM=webtop:3000 \
+    WEBTOP_UPSTREAM=127.0.0.1:33000 \
+    CERTADMIN_UPSTREAM=127.0.0.1:18080 \
+    REQUIRE_HOST_NETWORK=1 \
     TZ=Asia/Tokyo \
     GEOIP_DB=/usr/share/GeoIP/GeoLite2-Country.mmdb
 

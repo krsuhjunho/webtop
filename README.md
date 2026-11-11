@@ -73,7 +73,7 @@ docker run -d \
 | 3000 | 컨테이너 안 HTTP. 리버스 프록시는 이 포트로 붙습니다 |
 | 3001 | 컨테이너 안 HTTPS (자체 서명). 직접 접속할 때만 사용 |
 
-mTLS compose 에서는 webtop 의 3000/3001 을 호스트에 바인딩하지 않습니다. Nginx 가 `HTTPS_PORT`(기본 443)를 열고, `HTTP_PORT` 가 비어 있지 않을 때만 HTTP 리다이렉트를 엽니다.
+Nginx 는 호스트 네트워크에서 `HTTPS_PORT`(기본 443)와, 값이 있을 때만 `HTTP_PORT` 를 직접 엽니다. Docker 포트 프록시를 쓰면 방문자 주소가 172.17.0.1 로 바뀌고, 그 주소가 사설망으로 허용되어 국가 제한이 무력화됩니다. webtop 의 3000 과 certadmin 의 8080 은 127.0.0.1 에만 연결되어 Nginx 가 프록시합니다.
 
 ## 한국어 / 일본어 입력
 
@@ -138,7 +138,7 @@ Selkies 는 캡처용 컴포지터와 KWin 이 중첩이라, 자판에 없는 �
 ./webtop.sh install --cn webtop.example.com --name laptop --p12-pass '비밀번호'
 ```
 
-`install` 은 도구 확인, `.env`(포트 포함), 선택한 포트 점검, CA, 서버 인증서, 클라이언트 인증서, 스택 시작을 순서대로 하고, 이미 끝난 단계는 건너뜁니다. 443 이 다른 프로세스에 잡혀 있으면 HTTPS 기본값을 8443 으로 제안하고, 80 이 잡혀 있으면 HTTP 리다이렉트를 끌 수 있습니다. 값은 `HTTPS_PORT` 와 `HTTP_PORT`(비우면 HTTP 포트 없음)로 `deploy/.env` 에 저장됩니다. HTTP 를 켤 때만 `deploy/compose.http.yml` 이 함께 적용됩니다. Nginx 의 HTTP 리다이렉트는 443 이 아닐 때 `https://호스트:포트` 로 보냅니다.
+`install` 은 도구 확인, `.env`(포트 포함), 선택한 포트 점검, CA, 서버 인증서, 클라이언트 인증서, 스택 시작을 순서대로 하고, 이미 끝난 단계는 건너뜁니다. 443 이 다른 프로세스에 잡혀 있으면 HTTPS 기본값을 8443 으로 제안하고, 80 이 잡혀 있으면 HTTP 리다이렉트를 끌 수 있습니다. 값은 `HTTPS_PORT` 와 `HTTP_PORT`(비우면 HTTP 를 열지 않음)로 `deploy/.env` 에 저장됩니다. Nginx 가 그 포트를 호스트에서 직접 엽니다. HTTP 리다이렉트는 443 이 아닐 때 `https://호스트:포트` 로 보냅니다.
 
 `update` 와 `check-update` 는 이 머신의 아키텍처에 해당하는 `ghcr.io/krsuhjunho/webtop:latest` 다이제스트를 실행 중인 컨테이너, 로컬 이미지와 비교합니다. 같으면 받지 않습니다. 다르면 맞는 `yymmdd` 태그를 보여주고, 확인 후 pull 합니다. `cron-install` 은 사용자 crontab 에 `webtop.sh auto-update` 를 넣습니다. 기본은 월요일 06:00 이고, `UPDATE_MODE=check` 이면 로그만, `apply` 이면 새 다이제스트일 때 적용합니다. 잠금은 `flock` 이고 기록은 `deploy/logs/update.log` 입니다.
 
@@ -150,7 +150,7 @@ Selkies 는 캡처용 컴포지터와 KWin 이 중첩이라, 자판에 없는 �
 
 ## mTLS, GeoIP, Compose
 
-`deploy/docker-compose.yml` 은 webtop, GeoIP 갱신, Nginx 를 띄웁니다. webtop 포트는 공개되지 않습니다.
+`deploy/docker-compose.yml` 은 webtop, GeoIP 갱신, certadmin, Nginx 를 띄웁니다. Nginx 만 호스트 네트워크이고, webtop 과 certadmin 은 루프백 포트로만 붙습니다.
 
 Cloudflare 를 쓸 때는 **DNS only (회색 구름)** 만 사용하세요. 주황 구름 프록시는 TLS 를 Cloudflare 에서 끝내서 클라이언트 인증서가 Nginx 에 도달하지 않고, Nginx 가 보는 IP 도 방문자 IP 가 아니라 Cloudflare 주소가 됩니다. GeoIP 와 mTLS 가 둘 다 깨집니다.
 
@@ -165,7 +165,15 @@ cp deploy/.env.example deploy/.env
 
 `deploy/.env` 와 mmdb 파일은 커밋하지 않습니다. `geoipupdate` 가 `GeoLite2-Country` 를 받아 이름 있는 볼륨에 넣고, 기본 72시간마다 다시 받습니다. Nginx 모듈은 5분 간격으로 파일 변경을 확인해 다시 읽습니다.
 
-허용 국가는 `ALLOWED_COUNTRIES` (기본 `KR,JP`) 입니다. 사설/루프백/링크로컬 주소는 항상 허용합니다. 그 외 공인 IP 는 **TLS 핸드셰이크 전에** stream 계층에서 연결을 끊습니다. 국가 코드는 stream 로그와 HTTP 접근 로그에 남습니다.
+허용 국가는 `ALLOWED_COUNTRIES` (기본 `KR,JP`) 입니다. 사설/루프백/링크로컬 주소는 실제 클라이언트 주소일 때만 허용합니다. 그 외 공인 IP 는 **TLS 핸드셰이크 전에** stream 계층에서 연결을 끊습니다. DB에 국가가 없거나 알 수 없으면 거부합니다. mmdb 가 없거나 읽을 수 없으면 Nginx 는 시작하지 않습니다. 국가와 실제 클라이언트 IP 는 `deploy/logs/stream.log` (`allowed=0` 이 거부)와 `access.log` 에 남습니다.
+
+```bash
+./webtop.sh geo-status
+./webtop.sh geo-test 175.139.0.1
+./webtop.sh geo-test 1.2.3.4
+```
+
+`175.139.0.1` 은 말레이시아(MY) 예시입니다. 허용 목록이 KR,JP 이면 DROP 입니다. 한국 IP 는 ALLOW 입니다. 서버에서 결과가 모두 ALLOW 이고 country 가 비어 있으면 Nginx 가 호스트 네트워크가 아닌 것입니다. `geo-status` 의 네트워크 모드가 `host` 인지 확인하세요.
 
 같은 IP 의 동시 연결은 stream 에서 30개로 제한합니다. TLS 이후 요청은 IP 당 초당 30회(버스트 200), 동시 30연결입니다. 페이지가 429 로 잘리면 `deploy/nginx/nginx.conf` 의 `limit_req` / `limit_conn` 을 올리세요.
 
@@ -255,5 +263,5 @@ GitHub Actions 는 amd64 를 `ubuntu-24.04`, arm64 를 `ubuntu-24.04-arm` 에서
 
 - 화면이 검으면 `--shm-size=2g` 를 확인합니다. WebSocket 이 프록시에서 막혀도 같습니다. Nginx 는 버퍼링을 끄고 타임아웃을 1시간으로 둡니다.
 - 시계가 UTC 이면 `TZ=Asia/Tokyo` 인지, 볼륨에 남은 사용자 시간대 설정이 없는지 확인합니다. 컨테이너 안에서 `date` 가 JST 여야 합니다.
-- 국가 제한에 걸리면 인증서 선택 창도 뜨기 전에 연결이 끊깁니다. 집/회사 공인 IP 가 한국 또는 일본인지 확인하세요. 사설 IP 에서 붙는 관리 접속은 허용됩니다. mmdb 가 없으면 Nginx 는 기동하지 않습니다 (막힌 상태가 기본).
+- 국가 제한에 걸리면 인증서 선택 창도 뜨기 전에 연결이 끊깁니다. `./webtop.sh geo-test <공인IP>` 로 그 주소의 국가와 허용 여부를 확인하세요. 말레이시아를 포함한 허용 목록 밖 주소는 거부되어야 합니다. 사설 IP 에서 붙는 관리 접속은 허용됩니다. mmdb 가 없으면 Nginx 는 기동하지 않습니다 (막힌 상태가 기본). Docker 포트 매핑으로 Nginx 를 띄우면 안 됩니다. 방문자 IP 가 172.17.0.1 로 보이면 국가 제한이 적용되지 않습니다.
 - GeoIP 데이터베이스가 오래되면 `geoipupdate` 로그를 봅니다. 라이선스 키는 `deploy/.env` 에만 있습니다.

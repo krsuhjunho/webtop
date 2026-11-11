@@ -15,10 +15,30 @@ while [ ! -s "$DB" ]; do
   sleep 1
 done
 
+if [ "${REQUIRE_HOST_NETWORK:-1}" = 1 ] && [ ! -d /sys/class/net/docker0 ]; then
+  echo "REFUSING TO START: nginx is not in the host network namespace." >&2
+  echo "Docker's userland proxy would show every visitor as 172.17.0.1." >&2
+  echo "That address is in 172.16.0.0/12, which this config treats as LAN, so the KR/JP filter would allow every country." >&2
+  echo "Use network_mode: host. Set REQUIRE_HOST_NETWORK=0 only if you accept that bypass." >&2
+  exit 1
+fi
+
+# Exit 6 means the IP is absent. That is a readable database.
+# set -e would otherwise abort on that lookup. Any other failure refuses to start.
+mmdb_rc=0
+mmdblookup --file "$DB" --ip 127.0.0.1 >/tmp/mmdblookup.out 2>&1 || mmdb_rc=$?
+if [ "$mmdb_rc" -ne 0 ] && [ "$mmdb_rc" -ne 6 ]; then
+  cat /tmp/mmdblookup.out >&2
+  echo "GeoLite2 database is not readable: ${DB}" >&2
+  exit 1
+fi
+
 countries="${ALLOWED_COUNTRIES:-KR,JP}"
 {
   echo "map \$geoip2_country_code \$country_allowed {"
   echo "    default 0;"
+  echo "    \"\" 0;"
+  echo "    \"-\" 0;"
   # shellcheck disable=SC2086
   oldifs=$IFS
   IFS=', '
@@ -43,11 +63,34 @@ printf '%s' "$upstream" | grep -Eq '^[A-Za-z0-9._:-]+$' || {
 
 # Variable proxy_pass needs a resolver. Compose uses Docker's DNS.
 # Override NGINX_RESOLVER when the proxy is not on a compose network.
-resolver="resolver ${NGINX_RESOLVER:-127.0.0.11} valid=10s ipv6=off;"
+# Upstreams are IP literals, so Nginx does not need Docker's DNS.
+resolver=""
 
 https_port="${HTTPS_PORT:-443}"
 printf '%s' "$https_port" | grep -Eq '^[0-9]+$' || {
   echo "HTTPS_PORT is invalid: ${https_port}" >&2
+  exit 1
+}
+if [ "$https_port" -lt 1 ] || [ "$https_port" -gt 65535 ]; then
+  echo "HTTPS_PORT is out of range: ${https_port}" >&2
+  exit 1
+fi
+
+http_port="${HTTP_PORT:-}"
+if [ -n "$http_port" ]; then
+  printf '%s' "$http_port" | grep -Eq '^[0-9]+$' || {
+    echo "HTTP_PORT is invalid: ${http_port}" >&2
+    exit 1
+  }
+  if [ "$http_port" = "$https_port" ]; then
+    echo "HTTP_PORT and HTTPS_PORT must differ" >&2
+    exit 1
+  fi
+fi
+
+certadmin_upstream="${CERTADMIN_UPSTREAM:-127.0.0.1:18080}"
+printf '%s' "$certadmin_upstream" | grep -Eq '^[0-9A-Za-z._-]+:[0-9]+$' || {
+  echo "CERTADMIN_UPSTREAM is invalid: ${certadmin_upstream}" >&2
   exit 1
 }
 if [ "$https_port" = "443" ]; then
@@ -81,12 +124,47 @@ printf '%s' "$secret" | grep -Eq '^[A-Za-z0-9]{16,128}$' || {
   echo "}"
 } > /etc/nginx/admin-cn.conf
 
+v6=""
+if [ -n "$(cat /proc/net/if_inet6 2>/dev/null || true)" ]; then
+  v6="listen [::]:${https_port} reuseport;"
+fi
+http_v6=""
+if [ -n "$http_port" ] && [ -n "$v6" ]; then
+  http_v6="listen [::]:${http_port};"
+fi
+
+bytes=$(wc -c < "$DB" | tr -d ' ')
+echo "geoip fail-closed: allow=${countries} db=${DB} bytes=${bytes} https_port=${https_port} http_port=${http_port:-disabled}" >&2
+echo "geoip: empty or unknown country is denied. Private ranges are allowed only for the real client address." >&2
+
 sed \
   -e "s#__WEBTOP_UPSTREAM__#${upstream}#g" \
   -e "s#__RESOLVER__#${resolver}#g" \
   -e "s#__HTTPS_REDIRECT__#${redir}#g" \
   -e "s#__CERTADMIN_SECRET__#${secret}#g" \
+  -e "s#__HTTPS_PORT__#${https_port}#g" \
+  -e "s#__HTTPS_V6__#${v6}#g" \
+  -e "s#__HTTP_PORT__#${http_port:-80}#g" \
+  -e "s#__HTTP_V6__#${http_v6}#g" \
+  -e "s#__CERTADMIN_UPSTREAM__#${certadmin_upstream}#g" \
   /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf
+
+if [ -z "$http_port" ]; then
+  sed -i '/# HTTP_SERVER_BEGIN/,/# HTTP_SERVER_END/d' /etc/nginx/nginx.conf
+fi
+
+if ! nginx -t >/tmp/nginx-t.err 2>&1; then
+  if grep -q 'Address family not supported' /tmp/nginx-t.err; then
+    sed -i '/\[::\]/d' /etc/nginx/nginx.conf
+    nginx -t >/tmp/nginx-t.err 2>&1 || {
+      cat /tmp/nginx-t.err >&2
+      exit 1
+    }
+  else
+    cat /tmp/nginx-t.err >&2
+    exit 1
+  fi
+fi
 
 watch_crl() {
   last=0
