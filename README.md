@@ -185,7 +185,18 @@ Selkies 는 캡처용 컴포지터와 KWin 이 중첩이라, 자판에 없는 �
 
 프로파일은 `deploy/.env` 를 고치고, webtop 컨테이너가 켜져 있으면 그 컨테이너만 다시 만듭니다. `WEBTOP_VARIANT=kasm` 이면 프로파일은 적용하지 않고 Selkies 전용이라고 알립니다. `variant` 는 `WEBTOP_VARIANT` 와 `IMAGE_TAG` 를 맞추고, 컨테이너가 켜져 있으면 그 태그로 다시 만듭니다.
 
-루트의 `./webtop.sh` 가 배포에 필요한 일을 한곳에서 처리합니다. 인자 없이 실행하면 한국어 번호 메뉴가 반복되고, 작업을 마친 뒤 Enter 로 메뉴에 돌아옵니다. 같은 일을 명령으로도 실행할 수 있습니다. 메뉴의 로그 보기는 컨테이너 이름(`webtop`, `webtop-nginx`, `webtop-certadmin`, `webtop-geoipupdate`)으로 최근 100줄을 보여주고, 실행 중이면 Ctrl+C 할 때까지 따라갑니다. Ctrl+C 는 스크립트를 끝내지 않고 메뉴로 돌아옵니다. 컨테이너가 없으면 경로와 함께 오류를 냅니다. 접속 로그는 `deploy/logs/access.log` 를 시간, 국가, CN, 요청, 상태로 보여 주고, certadmin 감사 로그와 업데이트 로그도 고를 수 있습니다.
+루트의 `./webtop.sh` 가 배포에 필요한 일을 한곳에서 처리합니다. 스크립트는 심볼릭 링크를 따라 저장소 루트를 찾으므로, 어느 디렉터리에서 실행해도 `deploy/` 를 봅니다.
+
+```bash
+sudo ./webtop.sh link
+# /usr/local/bin/webtop -> 이 저장소의 webtop.sh
+# /etc/bash_completion.d/webtop 에 하위 명령 완료도 넣습니다
+webtop status
+```
+
+root 가 아니면 링크를 만들지 않고 sudo 예를 출력합니다. `link 다른이름` 이면 `/usr/local/bin/다른이름` 이 됩니다. `cron-install` 은 링크가 아니라 저장소 안의 절대 경로를 crontab 에 넣습니다.
+
+인자 없이 실행하면 한국어 번호 메뉴가 반복되고, 작업을 마친 뒤 Enter 로 메뉴에 돌아옵니다. 같은 일을 명령으로도 실행할 수 있습니다. 메뉴의 로그 보기는 컨테이너 이름(`webtop`, `webtop-nginx`, `webtop-certadmin`, `webtop-geoipupdate`)으로 최근 100줄을 보여주고, 실행 중이면 Ctrl+C 할 때까지 따라갑니다. Ctrl+C 는 스크립트를 끝내지 않고 메뉴로 돌아옵니다. 컨테이너가 없으면 경로와 함께 오류를 냅니다. 접속 로그는 `deploy/logs/access.log` 를 시간, 국가, CN, 요청, 상태로 보여 주고, certadmin 감사 로그와 업데이트 로그도 고를 수 있습니다.
 
 ```bash
 ./webtop.sh                  # 메뉴
@@ -206,6 +217,8 @@ Selkies 는 캡처용 컴포지터와 KWin 이 중첩이라, 자판에 없는 �
 ./webtop.sh check-update
 ./webtop.sh variant kasm
 ./webtop.sh update --yes
+./webtop.sh link
+./webtop.sh link
 ./webtop.sh cron-install --schedule '0 6 * * 1' --mode check
 ./webtop.sh install --cn webtop.example.com --name laptop --p12-pass '비밀번호'
 ```
