@@ -101,7 +101,7 @@ docker run -d \
 
 | 변수 | 기본값 | 설명 |
 | --- | --- | --- |
-| `PUID` / `PGID` | `1000` | `/config` 와 `abc` 계정의 uid/gid |
+| `PUID` / `PGID` | `1000` | `/config` 와 `abc` 계정의 uid/gid. `0` 이면 세션이 root 가 되고 VLC 가 뜨지 않습니다 |
 | `TZ` | `Asia/Tokyo` | 시스템 시간대. 데스크톱 시계도 이 값을 따릅니다 |
 | `LANG` | `ko_KR.UTF-8` | 세션 언어. `ja_JP.UTF-8` 또는 `en_US.UTF-8` |
 | `LC_ALL` | `ko_KR.UTF-8` | `LANG` 보다 우선합니다. 언어를 바꿀 때 둘 다 지정하세요 |
@@ -214,7 +214,20 @@ Selkies 는 캡처용 컴포지터와 KWin 이 중첩이라, 자판에 없는 �
 
 `update` 와 `check-update` 는 이 머신의 아키텍처에 해당하는 선택 태그(`IMAGE_TAG`, 기본 `latest`, Kasm 은 `kasm`) 다이제스트를 실행 중인 컨테이너, 로컬 이미지와 비교합니다. 같으면 받지 않습니다. 다르면 맞는 날짜 태그(`yymmdd` 또는 `kasm-yymmdd`)를 보여주고, 확인 후 pull 합니다. `cron-install` 은 사용자 crontab 에 `webtop.sh auto-update` 를 넣습니다. 기본은 월요일 06:00 이고, `UPDATE_MODE=check` 이면 로그만, `apply` 이면 새 다이제스트일 때 적용합니다. 잠금은 `flock` 이고 기록은 `deploy/logs/update.log` 입니다.
 
-라이선스 키와 PKCS#12 비밀번호는 메뉴에서 화면에 표시하지 않고 입력받습니다. 스택 명령은 `docker compose --env-file deploy/.env -f deploy/docker-compose.yml` 를 사용합니다.
+라이선스 키와 PKCS#12 비밀번호는 메뉴에서 화면에 표시하지 않고 입력받습니다. 스택 명령은 `docker compose --env-file deploy/.env -f deploy/docker-compose.yml` 를 사용합니다. `HTTP_PORT` 가 있으면 `deploy/compose.http.yml` 을 뒤에 붙입니다. `deploy/compose.override.yml` 이 있으면 그것도 마지막에 붙입니다. `-f` 를 직접 주면 Compose 가 override 를 자동으로 읽지 않으므로, `webtop.sh` 가 파일이 있을 때만 넣습니다.
+
+`PUID` 와 `PGID` 기본값은 1000 입니다. `sudo` 로 스크립트를 실행해도 `SUDO_UID` 가 0 이 아니면 그 값을 제안하고, 아니면 1000 입니다. `compose.override.yml` 이 `/config` 에 호스트 디렉터리를 붙이고 그 디렉터리가 있으면, 그 소유자 uid/gid 를 제안합니다. 저장된 값이 0 이면 `precheck` 와 `status` 가 경고합니다. `start` 는 대화형이면 고칠지 묻고, 비대화형이면 시작하지 않습니다. 0 으로 두면 abc 가 root 가 되고 VLC 는 `VLC is not supposed to be run as root` 로 끝납니다.
+
+이미 쓰던 설정 디렉터리를 붙이려면 `deploy/compose.override.yml` 을 만듭니다. 나중 파일이 같은 경로의 마운트를 덮으므로 이름 있는 볼륨 대신 이 디렉터리가 `/config` 가 됩니다. 소유자는 `PUID`/`PGID` 와 같아야 합니다.
+
+```yaml
+services:
+  webtop:
+    volumes:
+      - /docker/shark.ikenew.top/data:/config
+```
+
+영상과 소리의 기본 프로그램은 두 변형 모두 VLC 입니다. `/etc/xdg/mimeapps.list` 와 `/usr/share/applications/mimeapps.list` 에 두고, 컨테이너가 시작할 때마다 `/config/.config/mimeapps.list` 의 영상/소리 항목만 `vlc.desktop` 으로 고칩니다. 다른 타입과 사용자가 적어 둔 나머지 연결은 그대로입니다. `kde-mimeapps.list` 가 있으면 같은 항목만 고칩니다.
 
 `https://호스트/admin/` 은 클라이언트 인증서에 `OU=admin` 이 있거나 CN 이 `ADMIN_CNS` 에 있을 때만 열립니다. 메뉴의 관리자 인증서 발급 또는 `./webtop.sh client 이름 --admin` 으로 만듭니다. 그 페이지에서 인증서 목록, 발급, 폐기, 일회용 등록 링크를 처리합니다. 폐기하면 CRL 을 다시 쓰고 Nginx 가 잠시 후 다시 읽어 폐기된 인증서를 거부합니다. CA 개인키는 certadmin 컨테이너만 마운트합니다.
 

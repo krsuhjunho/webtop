@@ -9,6 +9,7 @@ ENV_EXAMPLE="$ROOT/deploy/.env.example"
 ENV_FILE="$ROOT/deploy/.env"
 COMPOSE_FILE="$ROOT/deploy/docker-compose.yml"
 COMPOSE_HTTP="$ROOT/deploy/compose.http.yml"
+COMPOSE_OVERRIDE="$ROOT/deploy/compose.override.yml"
 CERT_DIR="$ROOT/deploy/certs"
 GEN_CERTS="$ROOT/scripts/gen-certs.sh"
 ACCESS_LOG="${WEBTOP_ACCESS_LOG:-$ROOT/deploy/logs/access.log}"
@@ -199,6 +200,11 @@ compose() {
   http=$(env_get HTTP_PORT)
   if [[ -n "$http" ]]; then
     args+=(-f "$COMPOSE_HTTP")
+  fi
+  # Explicit -f disables Compose's automatic override. Add it last so a
+  # bind-mounted /config replaces the named volume.
+  if [[ -f "$COMPOSE_OVERRIDE" ]]; then
+    args+=(-f "$COMPOSE_OVERRIDE")
   fi
   docker compose "${args[@]}" "$@"
 }
@@ -392,6 +398,98 @@ date_prefix_for_tag() {
   esac
 }
 
+# Host path bind-mounted onto /config in deploy/compose.override.yml.
+config_bind_path() {
+  local line path
+  [[ -f "$COMPOSE_OVERRIDE" ]] || return 1
+  line=$(grep -E '^[[:space:]]*-[[:space:]]*[^[:space:]]+:/config([[:space:]:]|$)' "$COMPOSE_OVERRIDE" | tail -n 1 || true)
+  [[ -n "$line" ]] || return 1
+  path=$(printf '%s\n' "$line" | sed -n 's/^[[:space:]]*-[[:space:]]*\([^:]*\):\/config.*/\1/p')
+  [[ -n "$path" ]] || return 1
+  printf '%s' "$path"
+}
+
+suggested_puid() {
+  local path uid
+  if path=$(config_bind_path) && [[ -e "$path" ]]; then
+    uid=$(stat -c '%u' "$path")
+    if [[ -n "$uid" && "$uid" != "0" ]]; then
+      printf '%s' "$uid"
+      return
+    fi
+  fi
+  if [[ -n "${SUDO_UID:-}" && "${SUDO_UID}" != "0" ]]; then
+    printf '%s' "${SUDO_UID}"
+    return
+  fi
+  uid=$(id -u)
+  if [[ "$uid" != "0" ]]; then
+    printf '%s' "$uid"
+    return
+  fi
+  printf '1000'
+}
+
+suggested_pgid() {
+  local path gid
+  if path=$(config_bind_path) && [[ -e "$path" ]]; then
+    gid=$(stat -c '%g' "$path")
+    if [[ -n "$gid" && "$gid" != "0" ]]; then
+      printf '%s' "$gid"
+      return
+    fi
+  fi
+  if [[ -n "${SUDO_GID:-}" && "${SUDO_GID}" != "0" ]]; then
+    printf '%s' "${SUDO_GID}"
+    return
+  fi
+  gid=$(id -g)
+  if [[ "$gid" != "0" ]]; then
+    printf '%s' "$gid"
+    return
+  fi
+  printf '1000'
+}
+
+root_id_problem() {
+  local puid pgid
+  puid=$(env_get PUID)
+  pgid=$(env_get PGID)
+  [[ "$puid" == "0" || "$pgid" == "0" ]]
+}
+
+warn_root_ids() {
+  root_id_problem || return 0
+  err "PUID=$(env_get PUID) PGID=$(env_get PGID)"
+  err "0 이면 abc 가 root 가 됩니다. 세션이 root 로 뜨고, /config 소유자가 root 가 되며, VLC 는 'not supposed to be run as root' 로 종료합니다."
+  err "deploy/.env 의 PUID 와 PGID 를 $(suggested_puid)/$(suggested_pgid) 로 바꾸세요."
+}
+
+# Interactive start offers to rewrite 0. Noninteractive start refuses.
+offer_fix_root_ids() {
+  local answer uid gid
+  root_id_problem || return 0
+  warn_root_ids
+  uid=$(suggested_puid)
+  gid=$(suggested_pgid)
+  if [[ "$NONINTERACTIVE" -eq 1 ]]; then
+    err "비대화형 모드에서는 PUID/PGID 0 으로 시작하지 않습니다."
+    return 1
+  fi
+  answer=$(prompt "PUID/PGID 를 ${uid}/${gid} 로 바꾸고 계속할까요? (Y/n)" "Y")
+  if [[ "$answer" == "n" || "$answer" == "N" ]]; then
+    err "시작을 취소했습니다."
+    return 1
+  fi
+  if [[ "$(env_get PUID)" == "0" ]]; then
+    env_set PUID "$uid" || return 1
+  fi
+  if [[ "$(env_get PGID)" == "0" ]]; then
+    env_set PGID "$gid" || return 1
+  fi
+  ok "PUID=$(env_get PUID) PGID=$(env_get PGID) 로 저장했습니다. webtop 을 다시 만들어야 적용됩니다."
+}
+
 build_san() {
   local cn=$1 extra=$2 san item
   san="DNS:${cn},DNS:localhost,IP:127.0.0.1"
@@ -480,6 +578,7 @@ cmd_precheck() {
       warn "deploy/.env: MaxMind 값이 비어 있음"
     fi
     info "변형: $(env_get WEBTOP_VARIANT)  이미지 태그: $(env_get IMAGE_TAG)"
+    warn_root_ids || true
   else
     warn "deploy/.env: 없음"
   fi
@@ -511,9 +610,15 @@ cmd_env() {
     countries=${OPT_COUNTRIES:-$(env_get ALLOWED_COUNTRIES)}
     countries=${countries:-KR,JP}
     puid=${OPT_PUID:-$(env_get PUID)}
-    puid=${puid:-$(id -u)}
+    if [[ -z "$puid" || "$puid" == "0" ]]; then
+      [[ "$puid" == "0" ]] && warn "PUID 0 은 데스크톱을 root 로 만듭니다. $(suggested_puid) 을 사용합니다."
+      puid=$(suggested_puid)
+    fi
     pgid=${OPT_PGID:-$(env_get PGID)}
-    pgid=${pgid:-$(id -g)}
+    if [[ -z "$pgid" || "$pgid" == "0" ]]; then
+      [[ "$pgid" == "0" ]] && warn "PGID 0 은 데스크톱을 root 로 만듭니다. $(suggested_pgid) 을 사용합니다."
+      pgid=$(suggested_pgid)
+    fi
     tz=${OPT_TZ:-$(env_get TZ)}
     tz=${tz:-Asia/Tokyo}
   else
@@ -532,10 +637,16 @@ cmd_env() {
     current=${current:-KR,JP}
     countries=$(prompt "허용 국가" "$current")
     current=$(env_get PUID)
-    current=${current:-$(id -u)}
+    if [[ -z "$current" || "$current" == "0" ]]; then
+      [[ "$current" == "0" ]] && warn "저장된 PUID 가 0 입니다. root 세션에서는 VLC 가 뜨지 않습니다."
+      current=$(suggested_puid)
+    fi
     puid=$(prompt "PUID" "$current")
     current=$(env_get PGID)
-    current=${current:-$(id -g)}
+    if [[ -z "$current" || "$current" == "0" ]]; then
+      [[ "$current" == "0" ]] && warn "저장된 PGID 가 0 입니다. root 세션에서는 VLC 가 뜨지 않습니다."
+      current=$(suggested_pgid)
+    fi
     pgid=$(prompt "PGID" "$current")
     current=$(env_get TZ)
     current=${current:-Asia/Tokyo}
@@ -602,6 +713,10 @@ cmd_env() {
   fi
   if [[ ! "$puid" =~ ^[0-9]+$ || ! "$pgid" =~ ^[0-9]+$ ]]; then
     err "PUID 와 PGID 는 숫자여야 합니다."
+    return 1
+  fi
+  if [[ "$puid" == "0" || "$pgid" == "0" ]]; then
+    err "PUID 와 PGID 는 0 일 수 없습니다. 세션이 root 가 되고 VLC 가 시작을 거부합니다. $(suggested_puid) 을 사용하세요."
     return 1
   fi
   if [[ -z "$tz" || ! -e "/usr/share/zoneinfo/${tz}" ]]; then
@@ -943,6 +1058,7 @@ cmd_start() {
     err "MaxMind 설정이 비어 있습니다. 초기 설정을 먼저 하세요."
     return 1
   fi
+  offer_fix_root_ids || return 1
   compose up -d --build
   show_access_url
 }
@@ -954,11 +1070,18 @@ cmd_stop() {
 
 cmd_restart() {
   require_env_file || return 1
+  if root_id_problem; then
+    offer_fix_root_ids || return 1
+    info "바뀐 PUID/PGID 를 적용하려고 webtop 을 다시 만듭니다."
+    compose up -d --no-deps --force-recreate webtop
+    return 0
+  fi
   compose restart
 }
 
 cmd_status() {
   require_env_file || return 1
+  warn_root_ids || true
   compose ps
 }
 
@@ -1667,6 +1790,7 @@ prune_old_images() {
 cmd_update() {
   local answer
   require_env_file || return 1
+  offer_fix_root_ids || return 1
   cmd_check_update
   local rc=$?
   if [[ "$rc" -eq 0 ]]; then

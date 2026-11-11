@@ -160,6 +160,8 @@ COPY root/etc/xdg/fcitx5 /etc/xdg/fcitx5
 COPY root/etc/xdg/gtk-3.0/settings.ini /etc/xdg/gtk-3.0/settings.ini
 COPY root/etc/xdg/gtk-4.0/settings.ini /etc/xdg/gtk-4.0/settings.ini
 COPY root/etc/xdg/mimeapps.list /etc/xdg/mimeapps.list
+COPY root/usr/local/bin/webtop-mime /usr/local/bin/webtop-mime
+COPY root/usr/local/bin/webtop-patch-vlc /usr/local/bin/webtop-patch-vlc
 COPY root/etc/polkit-1/rules.d/49-sudo.rules /etc/polkit-1/rules.d/49-sudo.rules
 COPY root/usr/share/webtop/zshrc /usr/share/webtop/zshrc
 
@@ -168,6 +170,10 @@ RUN chmod 755 \
     /defaults/startwm.sh \
     /etc/profile.d/im.sh \
     /usr/local/bin/wrapped-brave \
+    /usr/local/bin/webtop-mime \
+    /usr/local/bin/webtop-patch-vlc \
+ && cp /etc/xdg/mimeapps.list /usr/share/applications/mimeapps.list \
+ && python3 /usr/local/bin/webtop-patch-vlc \
  && python3 /tmp/patch-web.py /kclient/public/index.html parent \
  && python3 /tmp/patch-web.py /usr/share/kasmvnc/www/index.html frame \
  && if [ -f /usr/share/kasmvnc/www/vnc.html ]; then python3 /tmp/patch-web.py /usr/share/kasmvnc/www/vnc.html frame; fi \
